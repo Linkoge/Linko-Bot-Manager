@@ -117,7 +117,7 @@ class World:
                   'CLOUDFLARE_TUNNEL_ID': TUNNEL, 'SYNCTHING_API_KEY': 'st-key-xyz'}
         args = dict(name='anna', email='anna@example.com', windows_folder='C:\\Work', domain='example.com', repo=ROOT,
                     python='/venv/bin/python', home_base=base, config=config, apply=apply, syncthing_device='WINDEV',
-                    systemd_dir=units, run=self.run, http=self.http, port_free=lambda p: True)
+                    systemd_dir=units, run=self.run, http=self.http, port_free=lambda p: True, pick_port=lambda: 20788)
         args.update(over)
         return pv.Plan(**args)
 
@@ -205,16 +205,62 @@ def test_generated_files_hold_no_credentials(world):
     assert 'AI_MANAGER_RESTRICTED=1' in texts[0]
     for text in texts:
         assert 'xyz' not in text and 'TOKEN' not in text and 'KEY' not in text
-    assert f'AI_MANAGER_PORT={plan.port}' in texts[0] and 8788 <= plan.port <= 8899
+    assert f'AI_MANAGER_PORT={plan.port}' in texts[0] and 20000 <= plan.port <= 29999
 
 
-def test_port_skips_ports_in_other_env_files(world):
+def picks(*ports):
+    queue = list(ports)
+    return lambda: queue.pop(0) if queue else queue_exhausted()
+
+
+def queue_exhausted():
+    raise AssertionError("more picks than expected")
+
+
+def test_port_skips_env_assigned_listening_manager_and_serve_ports(world):
     other = world.tmp / 'home' / 'bob/.config'
     other.mkdir(parents=True)
-    (other / 'linko-bot-manager-bob.env').write_text('AI_MANAGER_PORT=8788\n')
-    plan = world.plan(False)
-    pv.provision(plan)
-    assert plan.port == 8789
+    (other / 'linko-bot-manager-bob.env').write_text('AI_MANAGER_PORT=20001\n')
+    world.serve = {'TCP': {'20003': {'HTTPS': True}}, 'Web': {'x.ts.net:20004': {'Handlers': {}}}}
+    plan = world.plan(False, domain='', port_free=lambda p: p != 20002,
+                      pick_port=picks(8787, 20001, 20002, 20003, 20004, 20005))
+    receipt = pv.provision(plan)
+    assert plan.port == 20005 and status(receipt)['local port'] == 'planned'
+
+
+def test_random_port_is_in_range_and_default_pick_uses_secrets():
+    assert {pv.FIRST_PORT, pv.LAST_PORT} == {20000, 29999}
+    assert all(20000 <= pv.random_port() <= 29999 for _ in range(200))
+
+
+def test_port_is_free_detects_a_listener_on_any_address():
+    import socket
+    with socket.socket() as listener:
+        listener.bind(('0.0.0.0', 0))
+        listener.listen()
+        assert not pv.port_is_free(listener.getsockname()[1])
+
+
+def test_existing_env_port_is_kept(world):
+    plan = world.plan(False, pick_port=picks())
+    plan.env_file.parent.mkdir(parents=True)
+    plan.env_file.write_text('AI_MANAGER_RESTRICTED=1\nAI_MANAGER_PORT=24680\n')
+    plan.port = 21111
+    assert pv.Port(plan).check()[0] == pv.EXISTS and plan.port == 24680
+
+
+def test_saved_port_is_reused_when_free_and_replaced_when_not(world):
+    plan = world.plan(False, port=21111, pick_port=picks())
+    assert pv.Port(plan).check()[0] == pv.TODO and plan.port == 21111
+    plan = world.plan(False, port=21111, port_free=lambda p: p != 21111, pick_port=picks(22222))
+    assert pv.Port(plan).check()[0] == pv.TODO and plan.port == 22222
+
+
+def test_no_free_port_refuses_after_bounded_attempts(world):
+    calls = []
+    plan = world.plan(False, port_free=lambda p: False, pick_port=lambda: calls.append(1) or 20500)
+    state, detail = pv.Port(plan).check()
+    assert state == pv.REFUSE and 'no free port' in detail and 0 < len(calls) <= pv.PORT_ATTEMPTS and plan.port == 0
 
 
 def test_missing_credentials_refuse_without_changes(world):

@@ -158,11 +158,11 @@ def test_installer_records_instances_from_their_env_files_and_keeps_hand_edits(t
     monkeypatch.setenv('PATH', f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     (home / '.config').mkdir(parents=True)
     (home / '.config/linko-bot-manager-work.env').write_text(
-        '# comment\nAI_MANAGER_RESTRICTED=1\nAI_MANAGER_DATA="/srv/work-data"\nAI_MANAGER_PORT=8788\n')
+        '# comment\nAI_MANAGER_RESTRICTED=1\nAI_MANAGER_DATA="/srv/work-data"\nAI_MANAGER_PORT=20788\n')
     module.install(repo, data, home, ['work'])
     config = json.loads((data / 'deploy/installed.json').read_text())
     assert config['instances'] == [{'name': 'work', 'service': 'linko-bot-manager@work.service',
-                                    'data': '/srv/work-data', 'url': 'http://127.0.0.1:8788'}]
+                                    'data': '/srv/work-data', 'url': 'http://127.0.0.1:20788'}]
     # Re-running without --instance keeps the list, including edits such as service_cmds for another Linux user.
     config['instances'][0]['service_cmds'] = {'stop': ['sudo', '-n', 'stop-work'], 'start': ['sudo', '-n', 'start-work']}
     deploy_script.atomic(data / 'deploy/installed.json', config)

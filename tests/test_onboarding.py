@@ -92,7 +92,7 @@ class Host:
 
     def tick(self):
         return pv.tick(self.settings.data_dir, self.host_config, run=self.world.run, http=self.world.http, root_required=False,
-                       extra={"port_free": lambda port: True})
+                       extra={"port_free": lambda port: True, "pick_port": lambda: 20788})
 
     def create(self, **over):
         response = self.client.post("/api/onboarding", json={**FORM, **over})
@@ -567,10 +567,32 @@ def test_register_instances_keeps_hand_edited_entries(tmp_path):
     data = tmp_path / "data"
     (data / "deploy").mkdir(parents=True)
     (data / "deploy/installed.json").write_text(json.dumps({"repo": "r", "instances": [{"name": "old", "service_cmds": {"stop": ["x"]}}]}))
-    entry = {"name": "anna", "service": "u", "data": "/d", "url": "http://127.0.0.1:8788"}
+    entry = {"name": "anna", "service": "u", "data": "/d", "url": "http://127.0.0.1:20788"}
     assert install_deploy.register_instances(data, [entry]) is True
     assert install_deploy.register_instances(data, [entry]) is False
     names = [i["name"] for i in json.loads((data / "deploy/installed.json").read_text())["instances"]]
     assert names == ["old", "anna"]
     with pytest.raises(ValueError):
         install_deploy.register_instances(tmp_path / "none", [entry])
+
+
+def test_preview_port_is_the_port_apply_uses(tmp_path, monkeypatch):
+    h = Host(tmp_path, monkeypatch)
+    counter = iter(range(20100, 20200))  # every fresh pick differs, so a re-pick at apply time would show
+    def tick():
+        return pv.tick(h.settings.data_dir, h.host_config, run=h.world.run, http=h.world.http, root_required=False,
+                       extra={"port_free": lambda port: True, "pick_port": lambda: next(counter)})
+    with h.client:
+        h.sign_in()
+        record = h.create()
+        tick()
+        previewed = h.get(record["id"])
+        assert previewed["url"].endswith(":20100") and "tcp:20100" in previewed["policy"]
+        h.client.post(f"/api/onboarding/{record['id']}/preview")
+        tick()
+        assert h.get(record["id"])["url"].endswith(":20100")  # a re-check keeps the saved port
+        h.client.patch(f"/api/onboarding/{record['id']}", json={"device_id": PC_DEVICE})
+        assert h.client.post(f"/api/onboarding/{record['id']}/apply").json()["state"] == "provisioning"
+        tick()
+        done = h.get(record["id"])
+        assert done["url"].endswith(":20100") and "tcp:20100" in done["policy"]

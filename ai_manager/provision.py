@@ -42,7 +42,9 @@ DEVICE_RE = re.compile(r"^[A-Z0-9]{7}(-[A-Z0-9]{7}){7}$")
 DOMAIN_RE = re.compile(r"^(?=.{4,200}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
 MEMORY_RE = re.compile(r"^[1-9][0-9]{0,5}[MG]$")
 FOLDER_RE = re.compile(r"^[^\x00-\x1f\x7f'\"`\u2018\u2019\u201c\u201d$]{1,260}$")
-FIRST_PORT, LAST_PORT = 8788, 8899
+FIRST_PORT, LAST_PORT = 20000, 29999  # instance ports are picked at random from this high range
+MANAGER_PORT = 8787  # the manager's own port: never given to an instance
+PORT_ATTEMPTS = 200
 DEFAULT_CONFIG = Path("~/.config/linko-onboarding.env")
 HOST_CONFIG = Path("/etc/linko/onboarding.json")
 CLIENTS_KEY = "AI_MANAGER_ALLOWED_CLIENTS"
@@ -125,8 +127,21 @@ def http_json(method, url, headers=None, body=None):
 
 
 def port_is_free(port):
+    """Nothing listens on the port on loopback or on any address (a bind on either would collide)."""
     with socket.socket() as probe:
-        return probe.connect_ex(("127.0.0.1", port)) != 0
+        if probe.connect_ex(("127.0.0.1", port)) == 0:
+            return False
+    for address in ("127.0.0.1", "0.0.0.0"):
+        with socket.socket() as probe:
+            try:
+                probe.bind((address, port))
+            except OSError:
+                return False
+    return True
+
+
+def random_port():
+    return FIRST_PORT + secrets.randbelow(LAST_PORT - FIRST_PORT + 1)
 
 
 HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
@@ -164,6 +179,20 @@ def serve_status(run):
 
 def served_port(key, port):
     return key.rsplit(":", 1)[-1] == str(port) if ":" in key else False
+
+
+def serve_ports(status):
+    """Every port `tailscale serve` already uses (HTTPS, TCP forward, Web and Funnel keys), as ints."""
+    found = set()
+    for key in (status.get("TCP") or {}):
+        if str(key).isdigit():
+            found.add(int(key))
+    for section in ("Web", "AllowFunnel"):
+        for key in (status.get(section) or {}):
+            tail = str(key).rsplit(":", 1)[-1] if ":" in str(key) else ""
+            if tail.isdigit():
+                found.add(int(tail))
+    return found
 
 
 def local_target(target, port):
@@ -214,7 +243,8 @@ class Plan:
     run: object = run_command
     http: object = http_json
     port_free: object = port_is_free
-    port: int = 0
+    pick_port: object = random_port
+    port: int = 0  # the port saved on the onboarding record (request "port"): kept when still free, so preview == apply
     onboarding_hostnames: frozenset = frozenset()  # hostnames onboarding created (DB records + allow-list): the only ones a tunnel may hold
     service_user: str = ""  # the Linux user the manager runs as: gets scoped access to the new instance's data
     syncthing_user: str = ""  # the Linux user the Syncthing daemon runs as: gets scoped access to the new folder
@@ -341,14 +371,22 @@ class Port(Step):
             if match:
                 p.port = int(match.group(1))
                 return EXISTS, f"port {p.port} from existing env file"
-        taken = set()
+        taken = {MANAGER_PORT}
         for env in list(p.home_base.glob("*/.config/linko-bot-manager*.env")) + list(Path.home().glob(".config/linko-bot-manager*.env")):
             taken.update(int(m) for m in re.findall(r"^AI_MANAGER_PORT=(\d+)$", env.read_text(errors="ignore"), re.M))
-        for port in range(FIRST_PORT, LAST_PORT + 1):
-            if port not in taken and p.port_free(port):
+        try:
+            taken |= serve_ports(serve_status(p.run))
+        except ProvisionError:
+            if not p.domain:  # tailnet-only instances are published by `tailscale serve`: it must be answerable
+                raise
+        saved = p.port if FIRST_PORT <= p.port <= LAST_PORT else 0
+        for attempt in range(PORT_ATTEMPTS):
+            port = saved if attempt == 0 and saved else p.pick_port()
+            if FIRST_PORT <= port <= LAST_PORT and port not in taken and p.port_free(port):
                 p.port = port
                 return TODO, f"allocate 127.0.0.1:{port}"
-        return REFUSE, f"no free port between {FIRST_PORT} and {LAST_PORT}"
+        p.port = 0
+        return REFUSE, f"no free port found in {FIRST_PORT}-{LAST_PORT} after {PORT_ATTEMPTS} attempts"
 
     def apply(self):
         return "allocated"  # persisted by the env file step
@@ -906,6 +944,8 @@ def handle_request(path, host, directory, run=run_command, http=http_json, extra
                 syncthing_user=config.get("SYNCTHING_USER") or host["service_user"], run=run, http=http, client_ip=client_ip,
                 syncthing_url=config.get("SYNCTHING_URL", "http://127.0.0.1:8384"),
                 systemd_dir=Path(host.get("systemd_dir", "/etc/systemd/system")), **(extra or {}))
+    saved_port = request.get("port")
+    plan.port = saved_port if isinstance(saved_port, int) and FIRST_PORT <= saved_port <= LAST_PORT else 0
     result = {"id": identifier, "action": request["action"], "finished": False, "receipt": []}
 
     def publish(rows):

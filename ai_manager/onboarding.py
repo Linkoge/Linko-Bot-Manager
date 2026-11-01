@@ -165,7 +165,7 @@ class Onboarding:
         private_json(self.root / "requests" / f"{identifier}.json", {
             "id": identifier, "action": action, "name": row["name"], "email": row["email"],
             "windows_folder": row["windows_folder"], "domain": row["domain"], "memory_max": row["memory_max"],
-            "device_id": row["device_id"], "tailscale_ip": row["tailscale_ip"] or ""})
+            "device_id": row["device_id"], "tailscale_ip": row["tailscale_ip"] or "", "port": row["port"] or 0})
         (self.root / "results").mkdir(parents=True, exist_ok=True, mode=0o700)
         (self.root / "results" / f"{identifier}.json").unlink(missing_ok=True)
         self.update(identifier, pending_action=action, requested_at=self.now())
@@ -207,6 +207,8 @@ class Onboarding:
         receipt = [list(r) for r in result.get("receipt", [])]
         problem = next((f"{t}: {d}" for t, s, d in receipt if s in ("failed", "refused")), "")
         fields = {"pending_action": None}
+        if result.get("port"):
+            fields["port"] = int(result["port"])  # the preview's port is the one apply uses
         if row["pending_action"] == "apply":
             login = result.get("login")
             if login:

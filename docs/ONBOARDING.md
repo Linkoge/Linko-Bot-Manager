@@ -28,7 +28,7 @@ owner UI "Add user"  ──plan/apply──▶  spool  ──▶  user path unit
 | Sudoers rule | `/etc/sudoers.d/linko-onboarding` | root, `0440` |
 | Helper units | `~/.config/systemd/user/linko-bot-manager-onboarding.{path,service}` | manager user |
 | Windows script (single source; also embedded in the PC command) | `deploy/windows/Linko-Setup.ps1` | repository |
-| New user's instance | Linux user `<name>`, served on the tailnet at `https://<manager tailnet name>:<port>` (port 8788-8899, shown in the receipt): `/home/<name>/Documents/<name>` (the shared folder), `~/.config/linko-bot-manager-<name>.env`, `~/.local/share/linko-bot-manager-<name>/` (database, `initial-login.txt` until read), system unit `/etc/systemd/system/linko-bot-manager-<name>.service` | `<name>` |
+| New user's instance | Linux user `<name>`, served on the tailnet at `https://<manager tailnet name>:<port>` (random free port 20000-29999, shown in the receipt): `/home/<name>/Documents/<name>` (the shared folder), `~/.config/linko-bot-manager-<name>.env`, `~/.local/share/linko-bot-manager-<name>/` (database, `initial-login.txt` until read), system unit `/etc/systemd/system/linko-bot-manager-<name>.service` | `<name>` |
 | Deploy registration | `instances` list in `<data>/deploy/installed.json` | manager user |
 | CLI fallback | `python -m ai_manager.provision add-user` | root |
 
@@ -110,8 +110,13 @@ The first request is the proof: the Add User screen's plan preview only appears 
 
 ### Access URL per user
 
+Port allocation: a random port in 20000-29999 that is not the manager's 8787, not listening on 127.0.0.1 or 0.0.0.0, not in any
+`linko-bot-manager*.env`, and not used by `tailscale serve status --json`. After 200 failed picks the **local port** step refuses
+with "no free port found in 20000-29999". Troubleshooting: if the receipt shows that refusal, free ports on the host (`ss -ltn`)
+or clear stale `tailscale serve` entries, then Retry. If a record's policy snippet changes after Apply, the saved port had become busy.
+
 Each instance gets its own HTTPS port on the manager's tailnet name: **`https://<manager tailnet name>:<port>`**, e.g.
-`https://codex-server.tail5ebb9d.ts.net:8788` (the port is allocated from 8788-8899 and written in the receipt's
+`https://codex-server.tail5ebb9d.ts.net:23417` (the port is picked at random from 20000-29999 and written in the receipt's
 **tailnet serve** step and on the record). It only works from a device on the tailnet (the new PC joined it during
 enrollment), signed in with the email and generated password. Nothing is reachable from the public internet.
 
@@ -190,14 +195,14 @@ client; Apply again after the PC has reported in.
 
 **Layer 2: Tailscale policy (generated, applied by you).** Every record gets the tag `tag:linko-<name>`; the PC's auth key is
 minted with it. The Add User receipt (and the screen while enrolling) shows the matching policy snippet for that user, e.g. for
-`anna` on port 8788 (manager at `100.100.0.1`):
+`anna` on port 23417 (manager at `100.100.0.1`):
 
 ```json
 {
   "hosts": {"linko-manager": "100.100.0.1"},
   "tagOwners": {"tag:linko-anna": ["autogroup:admin"]},
   "grants": [
-    {"src": ["tag:linko-anna"], "dst": ["linko-manager"], "ip": ["tcp:8788", "tcp:8787"]},
+    {"src": ["tag:linko-anna"], "dst": ["linko-manager"], "ip": ["tcp:23417", "tcp:8787"]},
     {"src": ["linko-manager"], "dst": ["tag:linko-anna"], "ip": ["tcp:22", "tcp:22000"]}
   ]
 }
@@ -207,7 +212,7 @@ That is all it grants: the tag reaches the manager host on its own port and 8787
 and 22000 (Syncthing, which the manager initiates). Merge each user's `hosts`, `tagOwners` and `grants` entries into the tailnet
 policy file (*Access controls*; the same `linko-manager` alias is defined once). `ai_manager/tailnet_policy.py` generates it; the
 app never calls the Tailscale API to change the policy and never edits the tailnet's rules. The snippet appears once the plan has
-allocated the user's port (it is the `tcp:` port of the user's address). Apply the `tagOwners` entry **before** generating the
+allocated the user's port (it is the `tcp:` port of the user's address). The previewed port is saved on the record and sent with every later request, so Apply uses the same port (and the same snippet) unless it has meanwhile become busy; an existing instance always keeps the port in its env file. Apply the `tagOwners` entry **before** generating the
 PC command, otherwise Tailscale refuses to create a key with that tag.
 
 **The default allow-all rule must be removed for layer 2 to hold.** A tailnet that still has the default

@@ -187,23 +187,23 @@ def test_the_root_helper_refuses_a_forged_address_in_a_spooled_request(tmp_path,
 # ---- layer 2: per-user tag and policy snippet --------------------------------------------------------------------------
 @pytest.mark.smoke
 def test_snippet_grants_each_tag_only_its_port_and_8787_and_the_manager_only_ssh_and_syncthing():
-    text = tailnet_policy.snippet([("anna", 8788), ("bob", 8790)], "100.100.0.1")
+    text = tailnet_policy.snippet([("anna", 20788), ("bob", 20790)], "100.100.0.1")
     data = json.loads(text)
     assert set(data) == {"hosts", "tagOwners", "grants"}  # nothing else
     assert data["hosts"] == {"linko-manager": "100.100.0.1"}
     assert data["tagOwners"] == {"tag:linko-anna": ["autogroup:admin"], "tag:linko-bob": ["autogroup:admin"]}
     assert data["grants"] == [
-        {"src": ["tag:linko-anna"], "dst": ["linko-manager"], "ip": ["tcp:8788", "tcp:8787"]},
+        {"src": ["tag:linko-anna"], "dst": ["linko-manager"], "ip": ["tcp:20788", "tcp:8787"]},
         {"src": ["linko-manager"], "dst": ["tag:linko-anna"], "ip": ["tcp:22", "tcp:22000"]},
-        {"src": ["tag:linko-bob"], "dst": ["linko-manager"], "ip": ["tcp:8790", "tcp:8787"]},
+        {"src": ["tag:linko-bob"], "dst": ["linko-manager"], "ip": ["tcp:20790", "tcp:8787"]},
         {"src": ["linko-manager"], "dst": ["tag:linko-bob"], "ip": ["tcp:22", "tcp:22000"]}]
     for grant in data["grants"]:  # no wildcard, no shared tag, no other user's port
         assert "*" not in json.dumps(grant) and "tag:linko-pc" not in json.dumps(grant) and set(grant) == {"src", "dst", "ip"}
-    assert "8790" not in json.dumps(data["grants"][0]) and "8788" not in json.dumps(data["grants"][2])
+    assert "20790" not in json.dumps(data["grants"][0]) and "20788" not in json.dumps(data["grants"][2])
 
 
 def test_unknown_manager_ip_leaves_a_visible_placeholder():
-    assert json.loads(tailnet_policy.snippet([("anna", 8788)]))["hosts"] == {"linko-manager": tailnet_policy.UNKNOWN_IP}
+    assert json.loads(tailnet_policy.snippet([("anna", 20788)]))["hosts"] == {"linko-manager": tailnet_policy.UNKNOWN_IP}
 
 
 def test_the_minted_key_carries_the_users_own_tag_not_the_shared_one(tmp_path, monkeypatch):
@@ -222,7 +222,7 @@ def test_the_record_carries_the_tag_and_its_snippet_once_the_port_is_known(host_
     assert entry["tag"] == "tag:linko-anna"
     data = json.loads(entry["policy"])
     assert data["hosts"] == {"linko-manager": "100.100.0.1"}
-    assert data["grants"][0] == {"src": ["tag:linko-anna"], "dst": ["linko-manager"], "ip": ["tcp:8788", "tcp:8787"]}
+    assert data["grants"][0] == {"src": ["tag:linko-anna"], "dst": ["linko-manager"], "ip": ["tcp:20788", "tcp:8787"]}
     assert data["tagOwners"] == {"tag:linko-anna": ["autogroup:admin"]}
 
 

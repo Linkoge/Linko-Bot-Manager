@@ -41,7 +41,7 @@ def test_tailnet_only_preview_has_no_cloudflare_steps_and_includes_tailnet_serve
     assert world.mutating() == []  # a preview changes nothing, `tailscale serve` included
     assert not [c for c in world.calls if c[0] in ("GET", "PUT", "POST") and "cloudflare" in c[1]]  # no Cloudflare traffic at all
     serve = dict((t, d) for t, _, d in receipt)["tailnet serve"]
-    assert f"https://{SELF}:8788" in serve and "no Funnel" in serve
+    assert f"https://{SELF}:20788" in serve and "no Funnel" in serve
 
 
 def test_a_domain_is_never_filled_in_by_the_screen_or_the_api(tmp_path, monkeypatch):
@@ -55,7 +55,7 @@ def test_a_domain_is_never_filled_in_by_the_screen_or_the_api(tmp_path, monkeypa
         h.tick()
         steps = [s["title"] for s in h.get(record["id"])["steps"]]
         assert "tailnet serve" in steps and not [t for t in steps if "cloudflare" in t]
-        assert h.get(record["id"])["url"] == f"https://{SELF}:8788"
+        assert h.get(record["id"])["url"] == f"https://{SELF}:20788"
         assert not [c for c in h.world.calls if c[0] in ("GET", "PUT", "POST") and "cloudflare" in c[1]]
 
 
@@ -78,8 +78,8 @@ def test_serve_is_applied_once_and_the_second_run_skips_it(world):
     first = pv.provision(world.plan(True, domain=""))
     assert status(first)["tailnet serve"] == "created"
     serve = [c[1] for c in world.calls if c[0] == "run" and c[1][:2] == ["tailscale", "serve"] and "status" not in c[1]]
-    assert serve == [["tailscale", "serve", "--bg", "--https=8788", "http://127.0.0.1:8788"]]
-    assert dict((t, d) for t, _, d in first)["tailnet serve"].count(f"https://{SELF}:8788") == 1
+    assert serve == [["tailscale", "serve", "--bg", "--https=20788", "http://127.0.0.1:20788"]]
+    assert dict((t, d) for t, _, d in first)["tailnet serve"].count(f"https://{SELF}:20788") == 1
     second = pv.provision(world.plan(True, domain=""))
     assert set(status(second).values()) == {"skipped"}
     assert status(second)["tailnet serve"] == "skipped"
@@ -87,39 +87,45 @@ def test_serve_is_applied_once_and_the_second_run_skips_it(world):
     assert "AllowFunnel" not in world.serve
 
 
-def test_serve_to_another_target_refuses_the_whole_run_with_no_change(world):
-    world.serve = {"TCP": {"8788": {"HTTPS": True}}, "Web": {f"{SELF}:8788": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:9999"}}}}}
+@pytest.fixture
+def serve_changed_after_allocation(monkeypatch):
+    """Port allocation avoids ports serve already uses; these tests model serve changing after the port was chosen."""
+    monkeypatch.setattr(pv, "serve_ports", lambda status: set())
+
+
+def test_serve_to_another_target_refuses_the_whole_run_with_no_change(world, serve_changed_after_allocation):
+    world.serve = {"TCP": {"20788": {"HTTPS": True}}, "Web": {f"{SELF}:20788": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:9999"}}}}}
     receipt = pv.provision(world.plan(True, domain=""))
     assert status(receipt)["tailnet serve"] == "refused" and "not run" in status(receipt).values()
     assert world.mutating() == [] and "anna" not in world.users
 
 
 @pytest.mark.parametrize("served", [
-    {"TCP": {"8788": {"TCPForward": "127.0.0.1:22"}}},
-    {"TCP": {"8788": {"HTTPS": True}}, "Web": {f"{SELF}:8788": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8788"}, "/x": {"Proxy": "http://127.0.0.1:1"}}}}},
-    {"TCP": {"8788": {"HTTPS": True}}, "Web": {f"{SELF}:8788": {"Handlers": {"/": {"Path": "/srv"}}}}},
+    {"TCP": {"20788": {"TCPForward": "127.0.0.1:22"}}},
+    {"TCP": {"20788": {"HTTPS": True}}, "Web": {f"{SELF}:20788": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:20788"}, "/x": {"Proxy": "http://127.0.0.1:1"}}}}},
+    {"TCP": {"20788": {"HTTPS": True}}, "Web": {f"{SELF}:20788": {"Handlers": {"/": {"Path": "/srv"}}}}},
 ])
-def test_other_serve_shapes_on_the_port_are_conflicts(world, served):
+def test_other_serve_shapes_on_the_port_are_conflicts(world, served, serve_changed_after_allocation):
     world.serve = served
     assert status(pv.provision(world.plan(True, domain="")))["tailnet serve"] == "refused"
     assert world.mutating() == []
 
 
-def test_funnel_is_never_used_and_refused_when_on(world):
-    world.serve = {"TCP": {"8788": {"HTTPS": True}}, "Web": {f"{SELF}:8788": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8788"}}}},
-                   "AllowFunnel": {f"{SELF}:8788": True}}
+def test_funnel_is_never_used_and_refused_when_on(world, serve_changed_after_allocation):
+    world.serve = {"TCP": {"20788": {"HTTPS": True}}, "Web": {f"{SELF}:20788": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:20788"}}}},
+                   "AllowFunnel": {f"{SELF}:20788": True}}
     receipt = pv.provision(world.plan(True, domain=""))
     assert status(receipt)["tailnet serve"] == "refused" and "Funnel" in dict((t, d) for t, _, d in receipt)["tailnet serve"]
     assert world.mutating() == []
     # a Funnel on any host for that port counts, and a Funnel flag that is off does not
-    world.serve = {"AllowFunnel": {"other.ts.net:8788": True}}
+    world.serve = {"AllowFunnel": {"other.ts.net:20788": True}}
     assert status(pv.provision(world.plan(False, domain="")))["tailnet serve"] == "refused"
-    world.serve = {"AllowFunnel": {f"{SELF}:8788": False}}
+    world.serve = {"AllowFunnel": {f"{SELF}:20788": False}}
     assert status(pv.provision(world.plan(False, domain="")))["tailnet serve"] == "planned"
 
 
 def test_apply_asserts_the_result_has_no_funnel(world):
-    flag_funnel(world, 8788)
+    flag_funnel(world, 20788)
     receipt = pv.provision(world.plan(True, domain=""))
     row = next(r for r in receipt if r[0] == "tailnet serve")
     assert row[1] == "failed" and "Funnel" in row[2]
@@ -140,7 +146,7 @@ def test_env_file_hosts_for_tailnet_only_and_for_a_domain(world):
     pv.provision(plan)
     assert f"AI_MANAGER_ALLOWED_HOSTS=localhost,127.0.0.1,{SELF}\n" in plan.env_file.read_text()
     assert "anna." not in plan.env_file.read_text().replace("anna/", "").replace("anna:", "")
-    other = world.plan(True, domain="example.com", name="bob")
+    other = world.plan(True, domain="example.com", name="bob", pick_port=lambda: 20789)
     pv.provision(other)
     assert "AI_MANAGER_ALLOWED_HOSTS=localhost,127.0.0.1,bob.example.com\n" in other.env_file.read_text()
     assert SELF not in other.env_file.read_text()
@@ -314,7 +320,7 @@ def test_the_production_tunnel_is_refused_by_name_before_any_write(world):
         receipt = pv.provision(world.plan(True, config={**world.plan(True).config, **config}))
         assert set(status(receipt).values()) <= {"refused", "not run"} and status(receipt)["cloudflare tunnel route"] == "refused"
         assert "linko-messenger-webhook" in dict((t, d) for t, _, d in receipt)["cloudflare tunnel route"]
-    world.ingress = [{"hostname": "anna.example.com", "service": "http://127.0.0.1:8788"}, {"service": "http_status:404"}]
+    world.ingress = [{"hostname": "anna.example.com", "service": "http://127.0.0.1:20788"}, {"service": "http_status:404"}]
     assert status(pv.provision(world.plan(True)))["cloudflare dns cname"] == "refused"  # every Cloudflare step is guarded
     assert writes(world) == [] and world.mutating() == []
 
@@ -333,7 +339,7 @@ def test_a_dedicated_tunnel_accepts_its_own_hostnames_records_and_the_allow_list
         conn.executemany("INSERT INTO onboarding VALUES(?,?)", [("carl", "example.com"), ("dora", "")])
     assert pv.known_hostnames(tmp_path) == frozenset({"carl.example.com"}) and pv.known_hostnames(tmp_path / "missing") == frozenset()
     world.ingress = [{"hostname": "carl.example.com", "service": "http://127.0.0.1:8789"},
-                     {"hostname": "Extra.example.com", "service": "http://127.0.0.1:8790"}, {"service": "http_status:404"}]
+                     {"hostname": "Extra.example.com", "service": "http://127.0.0.1:20790"}, {"service": "http_status:404"}]
     config = {**world.plan(True).config, "LINKO_ONBOARDING_HOSTNAMES": "extra.example.com, x.example.com"}
     receipt = pv.provision(world.plan(True, config=config, onboarding_hostnames=pv.known_hostnames(tmp_path)))
     assert set(status(receipt).values()) <= {"created", "allocated", "started"}

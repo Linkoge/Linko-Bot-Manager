@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS onboarding(
  auto_apply INTEGER NOT NULL DEFAULT 0, device_id TEXT NOT NULL DEFAULT '', pc_hostname TEXT NOT NULL DEFAULT '',
  tailscale_ip TEXT NOT NULL DEFAULT '', token_hash TEXT, token_expires_at REAL,
  pending_action TEXT CHECK(pending_action IN ('plan','apply')), requested_at REAL,
- steps TEXT NOT NULL DEFAULT '[]', error TEXT NOT NULL DEFAULT '', login_secret TEXT,
+ steps TEXT NOT NULL DEFAULT '[]', error TEXT NOT NULL DEFAULT '', login_secret TEXT, port INTEGER,
  created_at REAL NOT NULL, updated_at REAL NOT NULL);
 """
 
@@ -85,6 +85,8 @@ class Database:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(SCHEMA)
             conn.executescript(HISTORY_SCHEMA)
+            if "port" not in {r[1] for r in conn.execute("PRAGMA table_info(onboarding)")}:
+                conn.execute("ALTER TABLE onboarding ADD COLUMN port INTEGER")
             columns = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
             for name, definition in (("display_name", "TEXT"), ("last_used_at", "REAL NOT NULL DEFAULT 0")):
                 if name not in columns:
