@@ -571,6 +571,10 @@ forwards its public hostname to it. Single owner, username/password login; there
   direct peer is in `AI_MANAGER_TRUSTED_PROXIES` (default `127.0.0.1,::1`; IPs or CIDRs). Otherwise the peer address is
   used. Login and setup-token attempts are throttled on that real address (10 per IP and 100 in total per 15 minutes),
   so one visitor cannot lock out the owner behind the shared tunnel address.
+- **Client allow-list**: with `AI_MANAGER_ALLOWED_CLIENTS` set (IPs or CIDRs; Add User writes the enrolled PC's Tailscale IP
+  there), every request from another address gets 403 before the host check and login; loopback health checks pass. Only
+  `X-Forwarded-For` from a trusted peer counts (right-most hop; `CF-Connecting-IP` is ignored). Unset: no restriction.
+  See [docs/ONBOARDING.md](docs/ONBOARDING.md#32-isolation).
 - **Cookie**: `ai_manager_session` is `HttpOnly`, `SameSite=Strict`, `Path=/`, and `Secure` when
   `AI_MANAGER_SECURE_COOKIE=1` (default) or the request is https (including `X-Forwarded-Proto: https` from a trusted
   proxy). Sessions last 30 days by default (`session_seconds`, overridden by `AI_MANAGER_SESSION_SECONDS` in seconds).

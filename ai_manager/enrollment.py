@@ -8,7 +8,6 @@ Cloudflare, Syncthing and Tailscale API keys never appear in it. Runbook: docs/O
 import base64
 import gzip
 import hashlib
-import ipaddress
 import json
 import re
 import secrets
@@ -17,17 +16,16 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from .provision import DEVICE_RE, FOLDER_RE, ProvisionError, http_json, local_target
+from .provision import DEVICE_RE, FOLDER_RE, ProvisionError, http_json, in_tailnet, local_target  # noqa: F401
+from .tailnet_policy import user_tag  # the PC's key carries tag:linko-<name>; the policy snippet scopes it
 
 SCRIPT = Path(__file__).resolve().parents[1] / "deploy" / "windows" / "Linko-Setup.ps1"
 TOKEN_SECONDS = 2 * 3600
 TAILSCALE_API = "https://api.tailscale.com/api/v2"
-DEFAULT_TAG = "tag:linko-pc"
 AUTH_KEY_RE = re.compile(r"^tskey-[A-Za-z0-9-]{8,200}$")
 PUBKEY_RE = re.compile(r"^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+) [A-Za-z0-9+/=]{20,2000}( [^\x00-\x1f\x7f'\"`$‘’“”]{0,100})?$")
 URL_RE = re.compile(r"^https?://[A-Za-z0-9.-]+(:\d{1,5})?$")
 HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,62}$")
-TAILNET = ipaddress.ip_network("100.64.0.0/10")
 
 
 def digest(token):
@@ -40,13 +38,6 @@ def new_token(now=None):
     return token, digest(token), (now if now is not None else time.time()) + TOKEN_SECONDS
 
 
-def in_tailnet(address):
-    try:
-        return ipaddress.ip_address(address) in TAILNET
-    except ValueError:
-        return False
-
-
 def ps_quote(value):
     """A PowerShell single-quoted literal. Callers validate first; doubling quotes is the second line of defence."""
     value = str(value)
@@ -56,12 +47,13 @@ def ps_quote(value):
 
 
 def mint_auth_key(config, name, http=http_json):
-    """A single-use, preauthorized, tagged Tailscale auth key that expires in two hours, via the Tailscale API."""
+    """A single-use, preauthorized Tailscale auth key tagged `tag:linko-<name>` (never a shared tag) that expires in two
+    hours, via the Tailscale API."""
     key, tailnet = config.get("TAILSCALE_API_KEY", ""), config.get("TAILSCALE_TAILNET", "")
     if not key or not tailnet:
         raise ProvisionError("TAILSCALE_API_KEY and TAILSCALE_TAILNET are not configured")
     body = {"capabilities": {"devices": {"create": {"reusable": False, "ephemeral": False, "preauthorized": True,
-                                                    "tags": [config.get("TAILSCALE_TAG") or DEFAULT_TAG]}}},
+                                                    "tags": [user_tag(name)]}}},
             "expirySeconds": TOKEN_SECONDS, "description": f"linko onboarding {name}"}
     status, data = http("POST", f"{TAILSCALE_API}/tailnet/{urllib.parse.quote(tailnet, safe='')}/keys",
                         {"Authorization": f"Bearer {key}"}, body)
@@ -69,6 +61,17 @@ def mint_auth_key(config, name, http=http_json):
     if status >= 300 or not AUTH_KEY_RE.match(auth):
         raise ProvisionError(f"Tailscale refused to create an auth key (HTTP {status}); check the API key, tailnet and tag")
     return auth
+
+
+def manager_tailnet_ip(config, run=None):
+    """The manager's own Tailscale IPv4 for the policy snippet: LINKO_MANAGER_TAILNET_IP, else `tailscale ip -4` (read only)."""
+    ip = (config.get("LINKO_MANAGER_TAILNET_IP") or "").strip()
+    if not ip:
+        try:
+            ip = (run or subprocess.run)(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=5).stdout.split()[0]
+        except (OSError, IndexError, subprocess.SubprocessError):
+            return ""
+    return ip if in_tailnet(ip) else ""
 
 
 def management_public_key(config, home):

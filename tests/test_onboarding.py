@@ -29,7 +29,7 @@ PC_DEVICE = "-".join(["WINDEVX"] * 8)
 TAILNET_HEADERS = {"x-forwarded-for": "100.64.7.9"}
 SECRETS = {"TAILSCALE_API_KEY": "tskey-api-" + "SECRETAPIKEY" * 2, "CLOUDFLARE_API_TOKEN": "cf-secret-token-marker",
            "SYNCTHING_API_KEY": "st-secret-key-marker"}
-ENV = {**SECRETS, "TAILSCALE_TAILNET": "example.ts.net", "LINKO_MANAGER_URL": "https://manager.example.ts.net",
+ENV = {**SECRETS, "TAILSCALE_TAILNET": "example.ts.net", "LINKO_MANAGER_URL": "https://manager.example.ts.net", "LINKO_MANAGER_TAILNET_IP": "100.100.0.1",
        "LINKO_SYNCTHING_DEVICE_ID": DEVICE, "CLOUDFLARE_ACCOUNT_ID": "acc",
        "CLOUDFLARE_ZONE_ID": "zone", "CLOUDFLARE_TUNNEL_ID": "t" * 8}
 FORM = {"name": "anna", "email": "anna@example.com", "windows_folder": "C:\\Users\\Anna\\Work"}

@@ -38,7 +38,7 @@ from .repair_progress import host_requests
 from .project_ideas import ProjectIdeas
 from .provision import DEVICE_RE, ProvisionError
 from .project_memory import MemoryReviews, ProjectMemory
-from .proxy import client_ip, enrollment_address, is_https, parse_trusted
+from .proxy import client_allowed, client_ip, enrollment_address, is_https, parse_clients, parse_trusted
 from .registry import Registry, git
 from .todos import Todos
 
@@ -275,6 +275,7 @@ def create_app(settings: Settings | None = None, server=None, worker_factory=Non
     app.state.memory, app.state.memory_reviews = memory, reviews
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.allowed_hosts))
     trusted_proxies = parse_trusted(settings.trusted_proxies)
+    allowed_clients = parse_clients(settings.allowed_clients)  # empty = no client restriction (the main instance)
 
     def set_session_cookie(response, token, request):
         response.set_cookie(
@@ -289,6 +290,9 @@ def create_app(settings: Settings | None = None, server=None, worker_factory=Non
 
     @app.middleware("http")
     async def browser_security(request: Request, call_next):
+        # Outermost check, before the host check, the session and every route: only the enrolled PC (and local health checks).
+        if allowed_clients and not client_allowed(request, trusted_proxies, allowed_clients):
+            return JSONResponse({"detail": "Forbidden"}, status_code=403, headers={"Cache-Control": "no-store"})
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             origin = request.headers.get("origin")
             if origin and urlsplit(origin).netloc != request.headers.get("host"):

@@ -60,8 +60,14 @@ class Settings:
     trusted_proxies: tuple[str, ...] = field(
         default_factory=lambda: tuple(os.getenv("AI_MANAGER_TRUSTED_PROXIES", "127.0.0.1,::1").split(","))
     )
+    # Allow-list of client addresses (IPs/CIDRs). Set: every other client gets 403 before auth (loopback health checks stay
+    # allowed); unset: no client restriction. The Add User step writes the enrolled PC's Tailscale IP here.
+    allowed_clients: tuple[str, ...] = field(
+        default_factory=lambda: tuple(os.getenv("AI_MANAGER_ALLOWED_CLIENTS", "").split(","))
+    )
 
     def __post_init__(self):
+        self.allowed_clients = tuple(c.strip() for c in self.allowed_clients if c.strip())
         hosts = [h.strip() for h in (*self.allowed_hosts, *self.public_hosts) if h.strip()]
         self.allowed_hosts = tuple(dict.fromkeys(hosts))
         if not self.restricted:

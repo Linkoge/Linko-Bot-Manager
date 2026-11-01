@@ -4,7 +4,7 @@ The goal: fill three fields in the owner UI, paste one line on the new person's 
 **tailnet only** (Tailscale Serve): no Cloudflare account, tunnel, DNS record or domain is needed or touched. Cloudflare is an
 optional appendix ([Appendix A](#appendix-a-optional-cloudflare-access-dedicated-tunnel-only)). This page is the
 complete guide: where everything lives, the one-time setup, the daily flow, the access URL per user, the trusted-proxy
-setting, the command-line fallback, troubleshooting, removal and rollback. The instance it creates is the existing restricted work instance
+setting, [isolation](#32-isolation)(#32-isolation), the command-line fallback, troubleshooting, removal and rollback. The instance it creates is the existing restricted work instance
 ([INSTALL.md section 6](INSTALL.md#6-optional-extra-instances),
 [README](../README.md#multiple-instances-and-the-restricted-work-instance)).
 
@@ -61,25 +61,15 @@ win over the file). The helper root process reads the same file for the Syncthin
 | `SYNCTHING_URL` | Optional, default `http://127.0.0.1:8384` |
 | `SYNCTHING_USER` | Optional: the Linux user the Syncthing daemon runs as (default: the manager user) |
 | `TAILSCALE_API_KEY`, `TAILSCALE_TAILNET` | Mint single-use PC auth keys on demand (below). Without them the screen shows a field to paste one key |
-| `TAILSCALE_TAG` | Optional, default `tag:linko-pc` |
+| `LINKO_MANAGER_TAILNET_IP` | Optional: the manager's own Tailscale IPv4, used only in the generated policy snippet (default: `tailscale ip -4`; if unknown the snippet shows `<MANAGER_TAILSCALE_IP>` to fill in) |
 | `LINKO_MANAGER_URL` | The manager's tailnet URL **with its port**, e.g. `https://codex-server.tail5ebb9d.ts.net:8787`. Its host is also the name every instance is reached under. Without it the host comes from `tailscale status --json` and the port from `tailscale serve status --json` (the port that serves `127.0.0.1:<manager port>`); if that cannot be determined the command fails and asks you to set this. 443 is never assumed |
 | `LINKO_SYNCTHING_DEVICE_ID` | Optional: the management Syncthing's device ID (default: read through the API) |
 | `LINKO_MANAGEMENT_PUBKEY_FILE` | Optional: another public key file |
 
-**Tailscale API key.** Admin console → *Settings → Keys → Generate access token* (valid up to 90 days; calendar the renewal).
-`TAILSCALE_TAILNET` is the tailnet name shown under *Settings → General* (`-` means the key's own tailnet). Allow the tag
-in the tailnet policy file, so keys can be created with it:
-
-```json
-"tagOwners": {"tag:linko-pc": ["autogroup:admin"]},
-"grants": [
-  {"src": ["tag:linko-pc"], "dst": ["<manager tailnet name or tag>"], "ip": ["8787", "8788-8899"]},
-  {"src": ["<manager>"],    "dst": ["tag:linko-pc"], "ip": ["22", "22000"]}
-]
-```
-
-Port 8787 is the manager (the PC's one report); 8788-8899 are the new users' instances. The key written into the PC command is created per click: single use (`reusable: false`), preauthorized, tagged, expiring
-after two hours. The API key itself never leaves the server.
+**Tailscale API key.** Optional; without it the screen asks for a pasted single-use key. The exact credential, its
+permissions and the policy to apply once are in [3.2 Isolation](#32-isolation). Each user's key is tagged `tag:linko-<name>`
+(never a shared tag) and is created per click: single use (`reusable: false`), preauthorized, expiring after two hours.
+The API key itself never leaves the server.
 
 **Syncthing API key.** Syncthing GUI → *Actions → Settings → GUI → API Key*.
 
@@ -134,7 +124,9 @@ Linux user (no sudo, no password), project and data directories, `git init`, fre
 (`AI_MANAGER_RESTRICTED=1`, `AI_MANAGER_ALLOWED_HOSTS=localhost,127.0.0.1,<manager tailnet name>`, no secrets), system unit with `MemoryMax`, the app login (random password), service enabled;
 **ACLs**: the Syncthing daemon user gets read/write on the new folder only (plus search-only `--x` on its parent
 directories), the new user gets default read/write on files Syncthing creates there, and the manager user gets access to the
-instance's data directory (deploy snapshots and health checks); **tailnet serve**
+instance's data directory (deploy snapshots and health checks); **client allow-list** (once the PC has reported in: its
+Tailscale IP is written as `AI_MANAGER_ALLOWED_CLIENTS=<ip>` into the env file, idempotently, a different existing value is
+refused; an already running instance is restarted, see [3.2](#32-isolation)); **tailnet serve**
 (`tailscale serve --bg --https=<port> http://127.0.0.1:<port>`; checked first with `tailscale serve status --json`: an
 identical entry is skipped, a different target for that port **refuses the whole run**, and Funnel is never used, the step
 refuses when Funnel is on for the port and asserts that the resulting serve config has no `AllowFunnel` entry); Syncthing device and folder (staggered versioning, `.git` ignored); and finally **deploy
@@ -178,6 +170,80 @@ exactly Tailscale Serve and is enough; set it explicitly (`AI_MANAGER_TRUSTED_PR
 Never add `100.64.0.0/10` or other tailnet ranges: whatever a trusted peer sends is believed. Onboarding makes no edit to
 the live configuration.
 
+### 3.2 Isolation
+
+A user's PC must reach **only its own instance port**, plus the manager's `:8787` for `/api/enroll/report`: not other users'
+instances and not unrelated tailnet services. Two independent layers enforce it. The first works today with no Tailscale
+credentials; the second needs the policy change below, applied once by the owner.
+
+**Layer 1: app-level allow-list (automatic).** When the PC's enrollment report arrives, Apply writes
+`AI_MANAGER_ALLOWED_CLIENTS=<the PC's Tailscale IP>` into the instance's env file (step **client allow-list**; idempotent;
+an existing different value is refused, not overwritten; an existing running instance is restarted with `systemctl try-restart`).
+An instance with the setting rejects every request whose client address is not in the list with `403`, before the host check,
+login and every route. Loopback is always allowed so health checks and deploys work. The address comes from the same
+trusted-proxy logic as 3.1, stricter: `X-Forwarded-For` is only believed from a trusted peer (loopback = Tailscale Serve), the
+**right-most** hop is used, `CF-Connecting-IP` is never read, and an unparsable hop denies. A device that connects to the
+instance directly is judged by its own address; headers it sends change nothing. The setting takes IPs and CIDRs, comma separated;
+a bad entry stops the start (fail closed). Unset means no restriction, so the main instance is unchanged. If no PC address is
+known (the device ID was typed by hand), the step does not exist and the screen warns that the instance is not restricted to one
+client; Apply again after the PC has reported in.
+
+**Layer 2: Tailscale policy (generated, applied by you).** Every record gets the tag `tag:linko-<name>`; the PC's auth key is
+minted with it. The Add User receipt (and the screen while enrolling) shows the matching policy snippet for that user, e.g. for
+`anna` on port 8788 (manager at `100.100.0.1`):
+
+```json
+{
+  "hosts": {"linko-manager": "100.100.0.1"},
+  "tagOwners": {"tag:linko-anna": ["autogroup:admin"]},
+  "grants": [
+    {"src": ["tag:linko-anna"], "dst": ["linko-manager"], "ip": ["tcp:8788", "tcp:8787"]},
+    {"src": ["linko-manager"], "dst": ["tag:linko-anna"], "ip": ["tcp:22", "tcp:22000"]}
+  ]
+}
+```
+
+That is all it grants: the tag reaches the manager host on its own port and 8787; the manager reaches the tag on 22 (SSH)
+and 22000 (Syncthing, which the manager initiates). Merge each user's `hosts`, `tagOwners` and `grants` entries into the tailnet
+policy file (*Access controls*; the same `linko-manager` alias is defined once). `ai_manager/tailnet_policy.py` generates it; the
+app never calls the Tailscale API to change the policy and never edits the tailnet's rules. The snippet appears once the plan has
+allocated the user's port (it is the `tcp:` port of the user's address). Apply the `tagOwners` entry **before** generating the
+PC command, otherwise Tailscale refuses to create a key with that tag.
+
+**The default allow-all rule must be removed for layer 2 to hold.** A tailnet that still has the default
+`{"src": ["*"], "dst": ["*"], "ip": ["*"]}` grant (or the legacy `acls` `*:*` rule) lets every device reach every other, whatever
+is granted here. Grants only add access. This is a change the owner makes in the admin console; the software does not touch it.
+Before removing it, make sure your own devices keep access (for example a grant for `autogroup:member` or your own user to
+what you use), or you lock yourself out. Until it is removed only layer 1 isolates.
+
+**Credentials for automatic key minting (optional).** Without them the screen shows a field to paste one single-use auth key
+(create it in the admin console with the tag `tag:linko-<name>`, *Reusable* off, *Ephemeral* off, *Pre-approved* on). For
+automatic minting give the manager one of:
+
+- An **API access token** (*Settings → Keys → Generate access token*; valid up to 90 days). It acts as its creator, so create it
+  as an Owner/Admin/Network admin; it can create auth keys for any tag that user owns. In the onboarding config:
+  `TAILSCALE_API_KEY=tskey-api-…` and `TAILSCALE_TAILNET=<tailnet name or ->`.
+- or an **OAuth client** (*Settings → OAuth clients → Generate*) with exactly the scope **`auth_keys` → Write** and the
+  **tags it may assign**: list every `tag:linko-<name>` you onboard (wildcards are not supported; the tags must exist in
+  `tagOwners`, and a new user's tag is added to the client). This version sends `TAILSCALE_API_KEY` as the bearer token and does
+  **not** perform the OAuth token exchange itself: use an API access token, or paste a single-use key per user, until that is added.
+
+Either way the credential is only the mint of single-use keys; it is never in the PC command and never in git.
+
+**Verify.** From the user's PC the instance opens (`curl -sI https://<manager tailnet name>:<port>/` returns `200` or a login
+redirect). From **another tailnet device** (not that PC): `curl -m 10 -sI https://<manager tailnet name>:<port>/` returns
+`403` (layer 1) or times out / is refused (layer 2 in force, usually the stronger result), and the same for another user's port and
+for `:8787/api/enroll/report` (`403` or timeout). On the manager, `curl -sI http://127.0.0.1:<port>/api/auth-status` stays `200`
+(health checks). In the admin console, *Machines* shows the PC with only its `tag:linko-<name>` tag.
+
+**Rollback.** Layer 1: remove the `AI_MANAGER_ALLOWED_CLIENTS=` line from the instance's env file and
+`systemctl restart linko-bot-manager-<name>`; the instance is open to the tailnet again as before. Layer 2: delete that user's
+`grants`, `tagOwners` and (when no user remains) the `linko-manager` host from the policy file, and restore your previous
+rule (for example the default allow-all) if you removed it; Tailscale keeps the policy history in the admin console. Devices
+already enrolled keep their tag until you change it (*Machines → Edit ACL tags*). Reverting the code (`git revert`, then
+`sudo python3 scripts/install_onboarding.py install`) returns to the shared `tag:linko-pc`, which no longer matches your
+policy: keep or restore the old `tag:linko-pc` entries before doing so.
+
 ## 4. Command-line fallback
 
 Everything the screen does can be done by hand as root (a dry run unless `--apply`):
@@ -210,8 +276,13 @@ manager user (after copying the env file as in INSTALL section 6) and set `servi
 - **"cannot determine the tailnet hostname" / manager URL errors** — set `LINKO_MANAGER_URL` (with its port) in the
   onboarding config, or log the machine in to Tailscale and make sure `tailscale serve status` lists the manager's port.
 - **Missing SYNCTHING_API_KEY** — section 2.2; the plan shows it before anything changes. (Cloudflare errors: Appendix A.)
-- **"Tailscale refused to create an auth key"** — the API key expired, the tailnet name is wrong, or `tag:linko-pc` is not in
-  `tagOwners`.
+- **"Tailscale refused to create an auth key"** — the API key expired, the tailnet name is wrong, or the user's tag
+  `tag:linko-<name>` is not in `tagOwners` yet (apply the snippet from the receipt screen first, see 3.2).
+- **The user gets `403 Forbidden` on their own instance** — the allow-list does not contain the address the request arrives
+  from. Tailscale Serve reports the PC's address in `X-Forwarded-For`; if the PC reaches the manager over IPv6 that is its
+  `fd7a:…` address, not the IPv4 it reported. Append it: `AI_MANAGER_ALLOWED_CLIENTS=100.x.y.z,fd7a:115c:a1e0::abcd`
+  in the instance's env file, then restart the unit. A step `refused: … already has AI_MANAGER_ALLOWED_CLIENTS=` means the value
+  was set by hand; the app never overwrites it.
 - **The PC cannot report in** — it must reach `LINKO_MANAGER_URL` over Tailscale (policy `grants`, Tailscale Serve running).
   A `403` means the request did not arrive from a tailnet address (Tailscale Serve running, loopback trusted: section 3.1;
   the manager's `AI_MANAGER_PORT` must be the port Serve forwards to), the token was used already or it expired. Generate a new command; the PC script is safe to re-run. Meanwhile you can type the PC's

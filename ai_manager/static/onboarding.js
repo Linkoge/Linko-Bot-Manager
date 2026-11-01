@@ -67,7 +67,19 @@ function renderOnboardingHome(body){
     catch(error){$('onboarding-error').textContent=error.message;}});
   body.append(form);
 }
+function renderOnboardingPolicy(entry,body){
+  // Isolation, layer 2: generated per-user tag + policy snippet. The owner applies it in the Tailscale admin console; this app never does.
+  const panel=element('details',undefined,'onboarding-policy');panel.open=entry.state==='done';
+  panel.append(element('summary',`Tailscale policy for ${entry.tag}`));
+  if(!entry.tailscale_ip)panel.append(element('p','The PC has not reported its Tailscale IP yet, so this instance is not restricted to one client. Re-run Apply once it has reported in.','onboarding-problem'));
+  if(!entry.policy){panel.append(element('p','The snippet appears once the plan has allocated this user\'s port (Re-check plan).','onboarding-hint'));body.append(panel);return;}
+  panel.append(element('p',`Paste into the tailnet policy file (Access controls). The PC key is tagged ${entry.tag}; it may reach the manager only on its own port and 8787. The default allow-all rule must be removed for this to isolate. Nothing here is applied for you.`,'onboarding-hint'));
+  const box=element('textarea');box.readOnly=true;box.rows=14;box.value=entry.policy;box.className='onboarding-policy-text';
+  const copy=element('button','Copy snippet');copy.type='button';copy.onclick=action(async()=>{box.select();try{await navigator.clipboard.writeText(box.value);}catch{document.execCommand('copy');}});
+  panel.append(box,copy);body.append(panel);
+}
 function renderOnboardingEnroll(entry,body){
+  renderOnboardingPolicy(entry,body);
   const panel=element('section',undefined,'onboarding-enroll');panel.append(element('h3','Windows PC'));
   if(entry.device_id){
     panel.append(element('p',`PC reported in: ${entry.pc_hostname||'manual entry'}${entry.tailscale_ip?' ('+entry.tailscale_ip+')':''} · Syncthing ${entry.device_id.slice(0,7)}…`,'onboarding-ok'));
@@ -100,6 +112,7 @@ function renderOnboardingEnroll(entry,body){
 }
 function renderOnboardingDone(entry,body){
   body.append(element('p',`${entry.name} is ready. Hand over the login below; it is shown once.`));
+  renderOnboardingPolicy(entry,body);
   if(onboardingLogin){
     const box=element('pre',`${onboardingLogin.email}\n${onboardingLogin.password}`,'onboarding-login');body.append(box,element('p','Not shown again. The file initial-login.txt on the server is already deleted. The person logs in to their AI provider themselves.','onboarding-hint'));
   }else if(entry.has_login){

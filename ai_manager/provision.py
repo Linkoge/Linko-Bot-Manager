@@ -17,6 +17,7 @@ therefore standard library only at import time (the root copy runs outside the r
 """
 import argparse
 import fcntl
+import ipaddress
 import json
 import os
 import pwd
@@ -44,6 +45,8 @@ FOLDER_RE = re.compile(r"^[^\x00-\x1f\x7f'\"`\u2018\u2019\u201c\u201d$]{1,260}$"
 FIRST_PORT, LAST_PORT = 8788, 8899
 DEFAULT_CONFIG = Path("~/.config/linko-onboarding.env")
 HOST_CONFIG = Path("/etc/linko/onboarding.json")
+CLIENTS_KEY = "AI_MANAGER_ALLOWED_CLIENTS"
+TAILNET = ipaddress.ip_network("100.64.0.0/10")
 CF_API = "https://api.cloudflare.com/client/v4"
 PRODUCTION_TUNNEL = "linko-messenger-webhook"  # carries production Messenger traffic: never touched by onboarding
 DEDICATED_PREFIX = "linko-onboarding"  # a Cloudflare tunnel may only be edited when its name starts with this
@@ -71,6 +74,14 @@ def validate_request(fields):
     if clean["device_id"] and not DEVICE_RE.match(clean["device_id"]):
         raise ProvisionError("Syncthing device ID looks like AAAAAAA-BBBBBBB-... (8 groups of 7)")
     return clean
+
+
+def in_tailnet(address):
+    """True for a Tailscale IPv4 address (100.64.0.0/10)."""
+    try:
+        return ipaddress.ip_address(address) in TAILNET
+    except ValueError:
+        return False
 
 
 def load_config(path, environ):
@@ -207,6 +218,7 @@ class Plan:
     onboarding_hostnames: frozenset = frozenset()  # hostnames onboarding created (DB records + allow-list): the only ones a tunnel may hold
     service_user: str = ""  # the Linux user the manager runs as: gets scoped access to the new instance's data
     syncthing_user: str = ""  # the Linux user the Syncthing daemon runs as: gets scoped access to the new folder
+    client_ip: str = ""  # the enrolled PC's Tailscale IP (its report); "" until it has reported in
 
     @property
     def home(self):
@@ -359,6 +371,7 @@ class EnvFile(Step):
             f"AI_MANAGER_PORT={p.port}\n"
             f"AI_MANAGER_ALLOWED_HOSTS={','.join(self.hosts())}\n"
             "AI_MANAGER_SECURE_COOKIE=1\n"
+            + (f"{CLIENTS_KEY}={p.client_ip}\n" if p.client_ip else "")
         )
 
     def check(self):
@@ -375,6 +388,40 @@ class EnvFile(Step):
         path.write_text(self.content())
         path.chmod(0o600)
         sh(self.plan, ["chown", f"{self.plan.name}:{self.plan.name}", str(path)])
+        return "created"
+
+
+class AllowedClients(Step):
+    """App-level isolation: the instance answers only the enrolled PC's Tailscale IP (and loopback health checks).
+    Idempotent; a different existing value is refused, never overwritten. Network-level layer: ai_manager/tailnet_policy.py."""
+    title = "client allow-list"
+
+    def current(self):
+        path = self.plan.env_file
+        if not path.is_file():
+            return None
+        found = re.findall(rf"^{CLIENTS_KEY}=(.*)$", path.read_text(), re.M)
+        return found[-1].strip() if found else ""
+
+    def check(self):
+        p = self.plan
+        if not in_tailnet(p.client_ip):
+            raise ProvisionError(f"{p.client_ip} is not a Tailscale address (100.64.0.0/10)")
+        current = self.current()
+        if current is None:
+            return EXISTS, f"{CLIENTS_KEY}={p.client_ip} is written with the new env file"
+        if current == p.client_ip:
+            return EXISTS, f"only {p.client_ip} (and loopback) may use this instance"
+        if current:
+            return REFUSE, f"{p.env_file} already has {CLIENTS_KEY}={current}, not {p.client_ip}; not overwriting"
+        return TODO, f"add {CLIENTS_KEY}={p.client_ip} to {p.env_file} and restart the instance"
+
+    def apply(self):
+        p = self.plan
+        text = p.env_file.read_text()
+        with p.env_file.open("a") as stream:  # appending keeps the file's owner and mode
+            stream.write(("" if text.endswith("\n") else "\n") + f"{CLIENTS_KEY}={p.client_ip}\n")
+        sh(p, ["systemctl", "try-restart", p.unit_name])  # a no-op when the instance is not running yet
         return "created"
 
 
@@ -743,6 +790,8 @@ class SyncFolder(Syncthing):
 
 def build_steps(plan):
     steps = [LinuxUser, Directories, GitInit, Port, EnvFile, SystemdUnit, OwnerLogin, StartService]
+    if plan.client_ip:  # only once the PC has reported its Tailscale IP; the screen warns while it has not
+        steps.insert(steps.index(SystemdUnit), AllowedClients)
     if plan.service_user:
         steps.append(ServiceAccess)
     steps.append(TailnetServe if not plan.domain else None)
@@ -846,12 +895,15 @@ def handle_request(path, host, directory, run=run_command, http=http_json, extra
     if not ID_RE.match(identifier) or path.name != identifier + ".json" or request.get("action") not in ("plan", "apply"):
         raise ProvisionError("malformed request")
     fields = validate_request(request)
+    client_ip = str(request.get("tailscale_ip") or "")
+    if client_ip and not in_tailnet(client_ip):  # lands in an env file as root: only a Tailscale address
+        raise ProvisionError("malformed request")
     config = load_config(host["config_file"], {})
     plan = Plan(name=fields["name"], email=fields["email"], windows_folder=fields["windows_folder"], domain=fields["domain"],
                 repo=Path(host["repo"]), python=host["app_python"], home_base=Path(host.get("home_base", "/home")), config=config,
                 apply=request["action"] == "apply", memory_max=fields["memory_max"], syncthing_device=fields["device_id"],
                 onboarding_hostnames=known_hostnames(host.get("data")), service_user=host["service_user"],
-                syncthing_user=config.get("SYNCTHING_USER") or host["service_user"], run=run, http=http,
+                syncthing_user=config.get("SYNCTHING_USER") or host["service_user"], run=run, http=http, client_ip=client_ip,
                 syncthing_url=config.get("SYNCTHING_URL", "http://127.0.0.1:8384"),
                 systemd_dir=Path(host.get("systemd_dir", "/etc/systemd/system")), **(extra or {}))
     result = {"id": identifier, "action": request["action"], "finished": False, "receipt": []}
@@ -918,6 +970,7 @@ def main(argv=None, environ=None):
     add.add_argument("--domain", help="optional Cloudflare appendix only: zone for <name>.<domain> (needs a dedicated tunnel); "
                                      "omit it for the default tailnet-only access")
     add.add_argument("--syncthing-device-id")
+    add.add_argument("--client-ip", default="", help="the PC's Tailscale IP: the instance then answers only that client (AI_MANAGER_ALLOWED_CLIENTS)")
     add.add_argument("--memory-max", default="1G")
     add.add_argument("--home-base", type=Path, default=Path("/home"))
     add.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="ignored KEY=VALUE credentials file outside git")
@@ -956,11 +1009,14 @@ def main(argv=None, environ=None):
         parser.error(str(error))
     if args.apply and args.dry_run:
         parser.error("--apply and --dry-run exclude each other")
+    if args.client_ip and not in_tailnet(args.client_ip):
+        parser.error("--client-ip must be a Tailscale address (100.64.0.0/10)")
     plan = Plan(name=args.name, email=args.email, windows_folder=args.windows_folder, domain=domain,
                 repo=Path(__file__).resolve().parents[1], python=sys.executable, home_base=args.home_base, config=config,
                 apply=args.apply, memory_max=fields["memory_max"], syncthing_device=fields["device_id"],
                 onboarding_hostnames=known_hostnames(args.data), skip_syncthing=args.skip_syncthing,
-                service_user=args.service_user or "", syncthing_user=config.get("SYNCTHING_USER") or args.service_user or "")
+                service_user=args.service_user or "", syncthing_user=config.get("SYNCTHING_USER") or args.service_user or "",
+                client_ip=args.client_ip)
     receipt = provision(plan)
     print_receipt(receipt, plan)
     return 1 if any(s in ("failed", "refused") for _, s, _ in receipt) else 0

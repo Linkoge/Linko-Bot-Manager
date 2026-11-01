@@ -58,6 +58,48 @@ def client_ip(request: Request, trusted) -> str:
     return peer
 
 
+def parse_clients(entries) -> tuple:
+    """The AI_MANAGER_ALLOWED_CLIENTS list: IPs or CIDRs only. A bad entry is an error, never silently dropped (fail closed)."""
+    parsed = []
+    for entry in entries:
+        if entry := entry.strip():
+            try:
+                parsed.append(ipaddress.ip_network(entry, strict=False))
+            except ValueError:
+                raise ValueError(f"AI_MANAGER_ALLOWED_CLIENTS: {entry!r} is not an IP address or CIDR") from None
+    return tuple(parsed)
+
+
+def peer_address(request: Request, trusted):
+    """The tailnet client address for the allow-list, or None when it cannot be established (deny).
+
+    Stricter than client_ip: CF-Connecting-IP is never read (any tailnet client can send it through Tailscale Serve), a
+    forwarded list is believed only from a trusted peer (loopback = Serve), and an unparsable right-most hop denies instead
+    of falling back to the peer. No forwarded header from a trusted peer means a local caller (health check): the peer."""
+    peer = request.client.host if request.client else ""
+    if not is_trusted(peer, trusted):
+        return peer or None
+    lines = request.headers.getlist("x-forwarded-for")
+    if not lines:
+        return peer
+    for part in reversed(",".join(lines).split(",")):
+        address = _address(part)
+        if address is None:
+            return None
+        if not is_trusted(str(address), trusted):
+            return str(address)
+    return peer
+
+
+def client_allowed(request: Request, trusted, clients) -> bool:
+    """True when the request comes from an address in `clients`, or from loopback itself (health checks)."""
+    address = _address(peer_address(request, trusted))
+    if address is None:
+        return False
+    address = getattr(address, "ipv4_mapped", None) or address  # ::ffff:a.b.c.d is a.b.c.d
+    return address.is_loopback or any(address.version == net.version and address in net for net in clients)
+
+
 def is_https(request: Request, trusted) -> bool:
     if request.url.scheme == "https":
         return True

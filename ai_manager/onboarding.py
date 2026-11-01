@@ -15,7 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import enrollment
+from . import enrollment, tailnet_policy
 from .config import CODE_ROOT
 from .provision import DEFAULT_CONFIG, HOST_CONFIG, ProvisionError, http_json, load_config, validate_request
 
@@ -31,6 +31,11 @@ def instance_url(steps):
         if title == "tailnet serve" and (found := re.search(r"https://[A-Za-z0-9.-]+:\d+", detail or "")):
             return found.group(0)
     return ""
+
+
+def instance_port(steps):
+    url = instance_url(steps)
+    return int(url.rsplit(":", 1)[1]) if url else None
 
 
 class Unknown(Exception):
@@ -65,6 +70,7 @@ class Onboarding:
     def __init__(self, db, settings, config_path=DEFAULT_CONFIG, http=http_json, host_config=HOST_CONFIG, now=time.time):
         self.db, self.settings, self.config_path, self.http, self.host_config, self.now = db, settings, config_path, http, host_config, now
         self.root = settings.data_dir / "onboarding"
+        self._manager_ip, self._manager_ip_tried = "", None
 
     # -- records -------------------------------------------------------------------------------------------------
     def config(self):
@@ -81,7 +87,20 @@ class Onboarding:
                 "steps": [{"title": t, "status": s, "detail": d} for t, s, d in steps], "error": row["error"],
                 "has_login": bool(row["login_secret"]), "created_at": row["created_at"], "updated_at": row["updated_at"],
                 "hostname": f"{row['name']}.{row['domain']}" if row["domain"] else "",
-                "url": instance_url(steps)}
+                "url": instance_url(steps), "tag": enrollment.user_tag(row["name"]),
+                "policy": self.policy(row["name"], instance_port(steps))}
+
+    def manager_ip(self):
+        """The manager's tailnet IP for the snippet (cached once known; a failed lookup is retried at most every 30 seconds)."""
+        if not self._manager_ip and (self._manager_ip_tried is None or self.now() - self._manager_ip_tried > 30):
+            self._manager_ip_tried = self.now()
+            self._manager_ip = enrollment.manager_tailnet_ip(self.config())
+        return self._manager_ip
+
+    def policy(self, name, port):
+        """The tailnet policy snippet for this user's tag (to be applied by the owner; the app never edits the policy),
+        or None while the instance port is not allocated yet (Re-check plan)."""
+        return tailnet_policy.snippet([(name, port)], self.manager_ip()) if port else None
 
     def row(self, identifier):
         row = self.db.one("SELECT * FROM onboarding WHERE id=?", (identifier,))
@@ -146,7 +165,7 @@ class Onboarding:
         private_json(self.root / "requests" / f"{identifier}.json", {
             "id": identifier, "action": action, "name": row["name"], "email": row["email"],
             "windows_folder": row["windows_folder"], "domain": row["domain"], "memory_max": row["memory_max"],
-            "device_id": row["device_id"]})
+            "device_id": row["device_id"], "tailscale_ip": row["tailscale_ip"] or ""})
         (self.root / "results").mkdir(parents=True, exist_ok=True, mode=0o700)
         (self.root / "results" / f"{identifier}.json").unlink(missing_ok=True)
         self.update(identifier, pending_action=action, requested_at=self.now())
