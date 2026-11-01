@@ -150,11 +150,22 @@ def test_forwarding_headers_are_ignored_from_untrusted_peer(tmp_path):
         assert app.state.db.one("SELECT count(*) AS n FROM login_attempts WHERE ip='testclient'")["n"] == 10
 
 
+class Headers(dict):
+    """Lower-cased headers; a list value stands for several header lines (Starlette's getlist)."""
+    def getlist(self, key):
+        value = self.get(key, [])
+        return value if isinstance(value, list) else [value]
+
+    def get(self, key, default=None):
+        value = super().get(key, default)
+        return ",".join(value) if isinstance(value, list) else value
+
+
 class Fake:
     def __init__(self, peer, headers=None, scheme="http"):
         from types import SimpleNamespace
         self.client = SimpleNamespace(host=peer) if peer else None
-        self.headers = {k.lower(): v for k, v in (headers or {}).items()}
+        self.headers = Headers({k.lower(): v for k, v in (headers or {}).items()})
         self.url = SimpleNamespace(scheme=scheme)
 
 
@@ -165,6 +176,7 @@ def test_client_ip_resolution_rules():
     assert client_ip(Fake("::1", {"CF-Connecting-IP": "not-an-ip", "X-Forwarded-For": "1.2.3.4"}), trusted) == "1.2.3.4"
     assert client_ip(Fake("127.0.0.1", {"X-Forwarded-For": "9.9.9.9, 1.2.3.4, 10.1.1.1"}), trusted) == "1.2.3.4"
     assert client_ip(Fake("127.0.0.1", {"X-Forwarded-For": "garbage"}), trusted) == "127.0.0.1"
+    assert client_ip(Fake("127.0.0.1", {"X-Forwarded-For": ["8.8.8.8", "100.64.7.9"]}), trusted) == "100.64.7.9"  # two header lines: right-most wins
     assert client_ip(Fake("10.2.3.4", {"CF-Connecting-IP": "1.2.3.4"}), trusted) == "1.2.3.4"
     assert client_ip(Fake("192.0.2.1", {"CF-Connecting-IP": "1.2.3.4"}), trusted) == "192.0.2.1"
     assert client_ip(Fake(None), trusted) == "unknown"
