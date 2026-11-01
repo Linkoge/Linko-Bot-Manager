@@ -38,7 +38,7 @@ from .repair_progress import host_requests
 from .project_ideas import ProjectIdeas
 from .provision import DEVICE_RE, ProvisionError
 from .project_memory import MemoryReviews, ProjectMemory
-from .proxy import client_ip, is_https, parse_trusted
+from .proxy import client_ip, enrollment_address, is_https, parse_trusted
 from .registry import Registry, git
 from .todos import Todos
 
@@ -474,7 +474,7 @@ def create_app(settings: Settings | None = None, server=None, worker_factory=Non
     @app.get("/api/onboarding", dependencies=owner_only)
     def onboarding_list():
         return {"entries": onboarding.list(), "installed": onboarding.installed(),
-                "tailscale_api": bool(onboarding.config().get("TAILSCALE_API_KEY")), "domain": onboarding.config().get("LINKO_DOMAIN", "")}
+                "tailscale_api": bool(onboarding.config().get("TAILSCALE_API_KEY"))}
 
     @app.post("/api/onboarding", dependencies=owner_only)
     def onboarding_create(body: OnboardingBody):
@@ -514,8 +514,8 @@ def create_app(settings: Settings | None = None, server=None, worker_factory=Non
         enrollment token (random, single use, two hours, stored hashed) is the credential. It records nothing else."""
         if restricted:
             raise HTTPException(404, "Not found")
-        address = client_ip(request, trusted_proxies)
-        if request.headers.get("cf-connecting-ip") or request.headers.get("cf-ray") or not in_tailnet(address):
+        address = enrollment_address(request, trusted_proxies, settings.port)
+        if address is None or not in_tailnet(address):
             raise HTTPException(403, "Only reachable from the tailnet")
         if not in_tailnet(body.tailscale_ip):
             raise HTTPException(422, "Invalid enrollment request")

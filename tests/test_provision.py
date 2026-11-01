@@ -1,6 +1,8 @@
 """ai_manager.provision with mocked system, Cloudflare and Syncthing calls; Linko-Setup.ps1 static checks."""
+import json
 import re
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -16,7 +18,10 @@ class World:
 
     def __init__(self, tmp):
         self.tmp, self.calls, self.users, self.enabled = tmp, [], set(), set()
-        self.ingress = [{'hostname': 'other.example.com', 'service': 'http://127.0.0.1:8787'}, {'service': 'http_status:404'}]
+        self.tunnel_name = 'linko-onboarding'  # Cloudflare steps only run on a tunnel dedicated to onboarding
+        self.ingress = [{'service': 'http_status:404'}]
+        self.serve = {}  # `tailscale serve status --json`
+        self.tailnet = 'manager.example.ts.net'
         self.dns, self.apps = [], []
         self.st_devices = [{'deviceID': 'EXISTING'}]
         self.st_folders = [{'id': 'shared', 'path': '/data/shared'}]
@@ -25,6 +30,8 @@ class World:
 
     def run(self, argv, **kw):
         self.calls.append(('run', argv))
+        if argv[0] == 'tailscale':
+            return self.tailscale(argv)
         if argv[0] == 'id':
             return (0, '1001') if argv[2] in self.users else (1, 'no such user')
         if argv[0] == 'useradd':
@@ -53,10 +60,23 @@ class World:
                 conn.execute('INSERT INTO owner VALUES(1,?)', (argv[-1],))
         return 0, ''
 
+    def tailscale(self, argv):
+        if argv[1:3] == ['status', '--json']:
+            return 0, json.dumps({'Self': {'DNSName': self.tailnet + '.'}})
+        if argv[1:4] == ['serve', 'status', '--json']:
+            return 0, json.dumps(self.serve)
+        assert argv[1:3] == ['serve', '--bg'] and argv[3].startswith('--https=') and len(argv) == 5, argv  # never funnel
+        port = argv[3].split('=')[1]
+        self.serve.setdefault('TCP', {})[port] = {'HTTPS': True}
+        self.serve.setdefault('Web', {})[f'{self.tailnet}:{port}'] = {'Handlers': {'/': {'Proxy': argv[4]}}}
+        return 0, ''
+
     def http(self, method, url, headers=None, body=None):
         self.calls.append((method, url, body))
         ok = lambda r: (200, {'success': True, 'result': r})
         if '/cfd_tunnel/' in url:
+            if not url.endswith('/configurations'):
+                return ok({'name': self.tunnel_name})
             if method == 'GET':
                 return ok({'config': {'ingress': list(self.ingress)}})
             self.ingress = body['config']['ingress']
@@ -102,7 +122,8 @@ class World:
         return pv.Plan(**args)
 
     def mutating(self):
-        return [c for c in self.calls if (c[0] == 'run' and c[1][0] in ('useradd', 'chown', 'runuser', 'setfacl')) or c[0] in ('PUT', 'POST')]
+        return [c for c in self.calls if (c[0] == 'run' and c[1][0] in ('useradd', 'chown', 'runuser', 'setfacl')) or
+                (c[0] == 'run' and c[1][0] == 'tailscale' and 'status' not in c[1]) or c[0] in ('PUT', 'POST')]
 
 
 @pytest.fixture
@@ -208,9 +229,10 @@ def test_config_file_and_env_precedence(tmp_path):
 
 
 def test_cli_defaults_to_dry_run(tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr(pv, 'run_command', lambda argv, **k: (1, ''))
-    code = pv.main(['add-user', '--name', 'anna', '--email', 'a@b.co', '--windows-folder', 'C:\\W', '--skip-cloudflare',
-                    '--skip-syncthing', '--home-base', str(tmp_path), '--config', str(tmp_path / 'none')], environ={})
+    monkeypatch.setattr(pv.subprocess, 'run', lambda argv, **k: subprocess.CompletedProcess(argv, *((0, '{}', '') if argv[0] == 'tailscale' else (1, '', ''))))  # nothing real runs
+    code = pv.main(['add-user', '--name', 'anna', '--email', 'a@b.co', '--windows-folder', 'C:\\W',
+                    '--skip-syncthing', '--home-base', str(tmp_path), '--config', str(tmp_path / 'none')],
+                   environ={'LINKO_MANAGER_URL': 'https://m.example.ts.net:8787'})
     assert code == 0 and 'DRY RUN' in capsys.readouterr().out and not list(tmp_path.iterdir())
 
 

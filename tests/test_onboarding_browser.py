@@ -35,7 +35,7 @@ def serve(tmp_path, restricted):
            'PYTHONPATH': str(ROOT)}
     if restricted:
         env.update(AI_MANAGER_RESTRICTED='1', AI_MANAGER_PROJECT=str(tmp_path / 'work'))
-    (tmp_path / 'ob.env').write_text('LINKO_DOMAIN=example.com\n')
+    (tmp_path / 'ob.env').write_text('')
     (tmp_path / 'data/onboarding').mkdir(parents=True)
     (tmp_path / 'data/onboarding/installed.json').write_text('{}')
     process = subprocess.Popen([sys.executable, '-c', PROGRAM], env=env, cwd=ROOT)

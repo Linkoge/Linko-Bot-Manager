@@ -2,7 +2,7 @@
 
 The line carries the repository's own deploy/windows/Linko-Setup.ps1 (gzip + base64, so there is no download and no
 public endpoint) and exactly these values: a single-use Tailscale auth key, the management server's SSH *public* key,
-the Windows folder, the manager's tailnet URL, its Syncthing device ID (public) and a one-time enrollment token.
+the Windows folder, the manager's tailnet URL (with its port), its Syncthing device ID (public) and a one-time enrollment token.
 Cloudflare, Syncthing and Tailscale API keys never appear in it. Runbook: docs/ONBOARDING.md.
 """
 import base64
@@ -17,7 +17,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from .provision import DEVICE_RE, FOLDER_RE, ProvisionError, http_json
+from .provision import DEVICE_RE, FOLDER_RE, ProvisionError, http_json, local_target
 
 SCRIPT = Path(__file__).resolve().parents[1] / "deploy" / "windows" / "Linko-Setup.ps1"
 TOKEN_SECONDS = 2 * 3600
@@ -85,18 +85,30 @@ def management_public_key(config, home):
     raise ProvisionError("no management SSH public key found; create one with `ssh-keygen -t ed25519` as the manager's user")
 
 
-def manager_url(config, run=None):
-    """The manager's own tailnet URL (Tailscale Serve), from LINKO_MANAGER_URL or `tailscale status --json`."""
-    url = (config.get("LINKO_MANAGER_URL") or "").rstrip("/")
+def manager_url(config, run=None, local_port=8787):
+    """The manager's own tailnet URL (Tailscale Serve). An explicit LINKO_MANAGER_URL wins, port included.
+    Otherwise the hostname is Self.DNSName of `tailscale status --json` and the HTTPS port is the one `tailscale serve
+    status --json` publishes for the manager's local port; no 443 is ever assumed."""
+    url = (config.get("LINKO_MANAGER_URL") or "").strip().rstrip("/")
     if not url:
+        run = run or subprocess.run
+        problem = "set LINKO_MANAGER_URL (https://<manager>.<tailnet>.ts.net[:port]) in the onboarding config"
         try:
-            done = (run or subprocess.run)(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=15)
-            name = json.loads(done.stdout)["Self"]["DNSName"].rstrip(".")
-            url = f"https://{name}"
-        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
-            raise ProvisionError("set LINKO_MANAGER_URL (https://<manager>.<tailnet>.ts.net) in the onboarding config") from None
+            status = json.loads(run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=15).stdout)
+            name = status["Self"]["DNSName"].rstrip(".")
+            served = json.loads(run(["tailscale", "serve", "status", "--json"], capture_output=True, text=True, timeout=15).stdout or "{}")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+            raise ProvisionError("cannot ask Tailscale for the manager's address: " + problem) from None
+        ports = sorted({int(key.rsplit(":", 1)[1]) for key, entry in (served.get("Web") or {}).items()
+                        if key.rsplit(":", 1)[0] == name and key.rsplit(":", 1)[1].isdigit()
+                        and local_target(((entry or {}).get("Handlers") or {}).get("/", {}).get("Proxy"), local_port)})
+        if not ports:
+            raise ProvisionError(f"Tailscale Serve does not publish 127.0.0.1:{local_port} for {name}: " + problem)
+        if len(ports) > 1:
+            raise ProvisionError(f"Tailscale Serve publishes 127.0.0.1:{local_port} on several ports ({', '.join(map(str, ports))}): " + problem)
+        url = f"https://{name}" + ("" if ports[0] == 443 else f":{ports[0]}")
     if not URL_RE.match(url):
-        raise ProvisionError("LINKO_MANAGER_URL must look like https://host.tailnet.ts.net")
+        raise ProvisionError("LINKO_MANAGER_URL must look like https://host.tailnet.ts.net[:port]")
     return url
 
 

@@ -6,6 +6,10 @@ Syncthing folder path in use) leaves the host untouched. API tokens come from th
 outside git (default ~/.config/linko-onboarding.env); nothing secret is written to generated files or the receipt.
 Runbook: docs/ONBOARDING.md.
 
+Access is tailnet-only by default: with no domain the instance is published with `tailscale serve` on its own port and no
+Cloudflare step exists. Cloudflare (tunnel route, DNS, Access) is an opt-in appendix that needs an explicit domain and a
+tunnel dedicated to onboarding (see `guard_tunnel`); the production Messenger tunnel is refused by name.
+
 The web app (never root) reaches the privileged part through a spool: it writes `<data>/onboarding/requests/<id>.json`,
 a user path unit starts `sudo -n python3 -I <root-owned copy of this file> --data <data> tick`, and `tick` validates the
 request again, runs the same `provision()` as root and writes `<data>/onboarding/results/<id>.json`. This module is
@@ -24,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +45,8 @@ FIRST_PORT, LAST_PORT = 8788, 8899
 DEFAULT_CONFIG = Path("~/.config/linko-onboarding.env")
 HOST_CONFIG = Path("/etc/linko/onboarding.json")
 CF_API = "https://api.cloudflare.com/client/v4"
+PRODUCTION_TUNNEL = "linko-messenger-webhook"  # carries production Messenger traffic: never touched by onboarding
+DEDICATED_PREFIX = "linko-onboarding"  # a Cloudflare tunnel may only be edited when its name starts with this
 CREDENTIAL_NOTE = "AI provider login (Codex/Claude) is a manual step done as the new user; nothing is copied from the owner."
 
 
@@ -111,12 +118,78 @@ def port_is_free(port):
         return probe.connect_ex(("127.0.0.1", port)) != 0
 
 
+HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
+
+
+def tailnet_host(config, run=run_command):
+    """The tailnet DNS name of this machine (no scheme, no port)."""
+    url = (config.get("LINKO_MANAGER_URL") or "").strip()
+    host = (urllib.parse.urlsplit(url).hostname or "") if url else ""
+    if not host:
+        code, output = run(["tailscale", "status", "--json"])
+        try:
+            host = json.loads(output)["Self"]["DNSName"].rstrip(".") if code == 0 else ""
+        except (ValueError, KeyError, TypeError, AttributeError):
+            host = ""
+    if not host or not HOST_RE.match(host):
+        raise ProvisionError("cannot determine the tailnet hostname: set LINKO_MANAGER_URL (https://<host>.<tailnet>.ts.net) "
+                             "in the onboarding config, or log this machine in to Tailscale")
+    return host.lower()
+
+
+def serve_status(run):
+    """`tailscale serve status --json` as a dict; ProvisionError when Tailscale cannot be asked."""
+    code, output = run(["tailscale", "serve", "status", "--json"])
+    if code:
+        raise ProvisionError(f"tailscale serve status failed: {output[-200:]}")
+    try:
+        status = json.loads(output or "{}")
+    except ValueError:
+        raise ProvisionError("tailscale serve status --json did not return JSON") from None
+    if not isinstance(status, dict):
+        raise ProvisionError("tailscale serve status --json did not return an object")
+    return status
+
+
+def served_port(key, port):
+    return key.rsplit(":", 1)[-1] == str(port) if ":" in key else False
+
+
+def local_target(target, port):
+    """True for http://127.0.0.1:<port> (or localhost) with no path."""
+    parts = urllib.parse.urlsplit(str(target))
+    return parts.scheme == "http" and parts.hostname in ("127.0.0.1", "localhost") and parts.port == port and parts.path in ("", "/")
+
+
+def funnel_ports(status, port):
+    """Keys of AllowFunnel that enable Funnel for this port (any host)."""
+    return [key for key, on in (status.get("AllowFunnel") or {}).items() if on and served_port(key, port)]
+
+
+def serve_state(status, port):
+    """('absent'|'same'|'other'|'funnel', detail) for one HTTPS port in a parsed serve status."""
+    if funnel_ports(status, port):
+        return "funnel", f"Funnel (public internet) is on for port {port}: {', '.join(funnel_ports(status, port))}"
+    web = {k: v for k, v in (status.get("Web") or {}).items() if served_port(k, port)}
+    tcp = (status.get("TCP") or {}).get(str(port))
+    if not web and not tcp:
+        return "absent", ""
+    for key, entry in web.items():
+        handlers = (entry or {}).get("Handlers") or {}
+        proxy = (handlers.get("/") or {}).get("Proxy")
+        if set(handlers) != {"/"} or not proxy or not local_target(proxy, port):
+            return "other", f"{key} is already served to {', '.join(f'{p} -> ' + str(h.get('Proxy') or h.get('Path') or h.get('Text') or '?') for p, h in handlers.items()) or 'something else'}"
+    if not web:
+        return "other", f"port {port} is already forwarded by Tailscale ({json.dumps(tcp)[:80]})"
+    return "same", ""
+
+
 @dataclass
 class Plan:
     name: str
     email: str
     windows_folder: str
-    domain: str
+    domain: str  # "" = tailnet-only (no Cloudflare)
     repo: Path
     python: str
     home_base: Path
@@ -125,13 +198,13 @@ class Plan:
     memory_max: str = "1G"
     syncthing_device: str = ""
     syncthing_url: str = "http://127.0.0.1:8384"
-    skip_cloudflare: bool = False
     skip_syncthing: bool = False
     systemd_dir: Path = Path("/etc/systemd/system")
     run: object = run_command
     http: object = http_json
     port_free: object = port_is_free
     port: int = 0
+    onboarding_hostnames: frozenset = frozenset()  # hostnames onboarding created (DB records + allow-list): the only ones a tunnel may hold
     service_user: str = ""  # the Linux user the manager runs as: gets scoped access to the new instance's data
     syncthing_user: str = ""  # the Linux user the Syncthing daemon runs as: gets scoped access to the new folder
 
@@ -157,7 +230,21 @@ class Plan:
 
     @property
     def hostname(self):
-        return f"{self.name}.{self.domain}"
+        """The Cloudflare hostname; empty in tailnet-only mode."""
+        return f"{self.name}.{self.domain}" if self.domain else ""
+
+    def tailnet_host(self):
+        """This machine's tailnet DNS name: host of LINKO_MANAGER_URL, else `tailscale status --json` Self.DNSName."""
+        if not hasattr(self, "_tailnet_host"):
+            self._tailnet_host = tailnet_host(self.config, self.run)
+        return self._tailnet_host
+
+    @property
+    def url(self):
+        """Where the person reaches the instance."""
+        if self.domain:
+            return f"https://{self.hostname}"
+        return f"https://{self.tailnet_host()}:{self.port}"
 
     @property
     def folder_id(self):
@@ -258,6 +345,11 @@ class Port(Step):
 class EnvFile(Step):
     title = "instance env file"
 
+    def hosts(self):
+        """Hostnames the instance accepts: with a domain `<name>.<domain>`, tailnet-only the machine's tailnet name."""
+        p = self.plan
+        return ["localhost", "127.0.0.1", p.hostname or p.tailnet_host()]
+
     def content(self):
         p = self.plan
         return (
@@ -265,7 +357,7 @@ class EnvFile(Step):
             f"AI_MANAGER_PROJECT={p.project}\n"
             f"AI_MANAGER_DATA={p.data}\n"
             f"AI_MANAGER_PORT={p.port}\n"
-            f"AI_MANAGER_ALLOWED_HOSTS=localhost,127.0.0.1,{p.hostname}\n"
+            f"AI_MANAGER_ALLOWED_HOSTS={','.join(self.hosts())}\n"
             "AI_MANAGER_SECURE_COOKIE=1\n"
         )
 
@@ -440,6 +532,68 @@ class ServiceAccess(Acl):
         return path == self.plan.data
 
 
+class TailnetServe(Step):
+    """Publish 127.0.0.1:<port> on the tailnet only (`tailscale serve`, never Funnel). The one access path by default."""
+    title = "tailnet serve"
+
+    def target(self):
+        return f"http://127.0.0.1:{self.plan.port}"
+
+    def check(self):
+        p = self.plan
+        url = p.url  # also proves the tailnet hostname is known
+        state, detail = serve_state(serve_status(p.run), p.port)
+        if state == "funnel":
+            return REFUSE, detail + "; onboarding never uses Funnel. Turn it off first: tailscale funnel --https=%d off" % p.port
+        if state == "other":
+            return REFUSE, f"{detail}, not {self.target()}; refusing to change it"
+        if state == "same":
+            return EXISTS, f"{url} already serves {self.target()} on the tailnet"
+        return TODO, f"tailscale serve --bg --https={p.port} {self.target()} -> {url} (tailnet only, no Funnel)"
+
+    def apply(self):
+        p = self.plan
+        sh(p, ["tailscale", "serve", "--bg", f"--https={p.port}", self.target()])
+        state, detail = serve_state(serve_status(p.run), p.port)
+        if state == "funnel":
+            raise ProvisionError(detail + "; turn it off: tailscale funnel --https=%d off" % p.port)
+        if state != "same":
+            raise ProvisionError(f"tailscale serve did not publish {self.target()} on port {p.port}" + (f": {detail}" if detail else ""))
+        return "created"
+
+
+def guard_tunnel(plan, tunnel_name, config):
+    """Cloudflare steps edit only a tunnel dedicated to onboarding. Runs in check(), before any write.
+    1. Never the production tunnel (by name, whatever else is configured).
+    2. The tunnel's name must start with `linko-onboarding`.
+    3. Every hostname already in its ingress must be one onboarding created: a hostname of an onboarding record in the
+       manager database, this run's own hostname, or an entry of LINKO_ONBOARDING_HOSTNAMES (comma separated allow-list)."""
+    if tunnel_name.strip().lower() == PRODUCTION_TUNNEL:
+        raise ProvisionError(f"refusing the tunnel '{PRODUCTION_TUNNEL}': it carries production traffic and onboarding never touches it")
+    if not tunnel_name.startswith(DEDICATED_PREFIX):
+        raise ProvisionError(f"refusing tunnel '{tunnel_name or '?'}': Cloudflare steps need a tunnel dedicated to onboarding "
+                             f"(name starting with '{DEDICATED_PREFIX}'); see docs/ONBOARDING.md appendix")
+    allowed = set(plan.onboarding_hostnames) | {plan.hostname}
+    allowed |= {h.strip().lower() for h in plan.config.get("LINKO_ONBOARDING_HOSTNAMES", "").split(",") if h.strip()}
+    foreign = sorted({r["hostname"] for r in config.get("ingress", []) if r.get("hostname") and r["hostname"].lower() not in allowed})
+    if foreign:
+        raise ProvisionError(f"refusing tunnel '{tunnel_name}': its ingress has hostnames onboarding did not create ({', '.join(foreign[:5])}); "
+                             "use a dedicated tunnel or list them in LINKO_ONBOARDING_HOSTNAMES")
+
+
+def known_hostnames(data):
+    """Hostnames of onboarding records in the manager database (read-only; empty when there is none)."""
+    db = Path(data) / "manager.sqlite3" if data else None
+    if not db or not db.is_file():
+        return frozenset()
+    try:
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5) as conn:
+            rows = conn.execute("SELECT name, domain FROM onboarding WHERE domain != ''").fetchall()
+    except sqlite3.Error:
+        return frozenset()
+    return frozenset(f"{name}.{domain}".lower() for name, domain in rows)
+
+
 class Cloudflare(Step):
     def api(self, method, path, body=None):
         token = self.plan.config.get("CLOUDFLARE_API_TOKEN", "")
@@ -454,6 +608,18 @@ class Cloudflare(Step):
             raise ProvisionError("missing " + ", ".join(missing) + " (environment or ignored config file)")
         return [self.plan.config[k] for k in keys]
 
+    def tunnel(self):
+        """The tunnel's ingress config, after `guard_tunnel` said it is dedicated to onboarding (cached per run)."""
+        if not hasattr(self.plan, "_tunnel_config"):
+            self.need("CLOUDFLARE_API_TOKEN")
+            account, tunnel = self.need("CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_TUNNEL_ID")
+            base = f"/accounts/{account}/cfd_tunnel/{tunnel}"
+            info = self.api("GET", base) or {}
+            config = (self.api("GET", base + "/configurations") or {}).get("config") or {}
+            guard_tunnel(self.plan, info.get("name") or "", config)
+            self.plan._tunnel_config = config
+        return self.plan._tunnel_config
+
 
 class TunnelRoute(Cloudflare):
     title = "cloudflare tunnel route"
@@ -463,9 +629,7 @@ class TunnelRoute(Cloudflare):
         return f"/accounts/{account}/cfd_tunnel/{tunnel}/configurations"
 
     def check(self):
-        self.need("CLOUDFLARE_API_TOKEN")
-        result = self.api("GET", self._path()) or {}
-        self.config = (result.get("config") or {})
+        self.config = self.tunnel()
         service = f"http://127.0.0.1:{self.plan.port}"
         for rule in self.config.get("ingress", []):
             if rule.get("hostname") == self.plan.hostname:
@@ -487,7 +651,7 @@ class DnsRecord(Cloudflare):
     title = "cloudflare dns cname"
 
     def check(self):
-        self.need("CLOUDFLARE_API_TOKEN")
+        self.tunnel()
         zone, tunnel = self.need("CLOUDFLARE_ZONE_ID", "CLOUDFLARE_TUNNEL_ID")
         target = f"{tunnel}.cfargotunnel.com"
         records = self.api("GET", f"/zones/{zone}/dns_records?name={self.plan.hostname}") or []
@@ -508,7 +672,7 @@ class AccessApp(Cloudflare):
     title = "cloudflare access application"
 
     def check(self):
-        self.need("CLOUDFLARE_API_TOKEN")
+        self.tunnel()
         (account,) = self.need("CLOUDFLARE_ACCOUNT_ID")
         for app in self.api("GET", f"/accounts/{account}/access/apps") or []:
             if app.get("domain") == self.plan.hostname:
@@ -581,11 +745,12 @@ def build_steps(plan):
     steps = [LinuxUser, Directories, GitInit, Port, EnvFile, SystemdUnit, OwnerLogin, StartService]
     if plan.service_user:
         steps.append(ServiceAccess)
-    if not plan.skip_cloudflare:
+    steps.append(TailnetServe if not plan.domain else None)
+    if plan.domain:  # optional appendix: Cloudflare only on an explicit domain
         steps += [TunnelRoute, DnsRecord, AccessApp]
     if not plan.skip_syncthing:
         steps += ([SyncthingAccess] if plan.syncthing_user else []) + [SyncDevice, SyncFolder]
-    return [cls(plan) for cls in steps]
+    return [cls(plan) for cls in steps if cls]
 
 
 def provision(plan, progress=None):
@@ -620,7 +785,11 @@ def print_receipt(receipt, plan, out=print):
     out(("RECEIPT" if plan.apply else "DRY RUN PLAN (nothing changed; add --apply)") + f" for {plan.name} <{plan.email}>")
     for title, status, detail in receipt:
         out(f"  [{status:8}] {title}: {detail}")
-    out(f"  hostname https://{plan.hostname}  port {plan.port or '-'}")
+    try:
+        url = plan.url if plan.port else "-"
+    except ProvisionError:
+        url = "-"
+    out(f"  instance URL {url}  port {plan.port or '-'}")
     out(f"  note: {CREDENTIAL_NOTE}")
 
 
@@ -678,11 +847,10 @@ def handle_request(path, host, directory, run=run_command, http=http_json, extra
         raise ProvisionError("malformed request")
     fields = validate_request(request)
     config = load_config(host["config_file"], {})
-    domain = fields["domain"] or config.get("LINKO_DOMAIN", "")
-    plan = Plan(name=fields["name"], email=fields["email"], windows_folder=fields["windows_folder"], domain=domain or "local",
+    plan = Plan(name=fields["name"], email=fields["email"], windows_folder=fields["windows_folder"], domain=fields["domain"],
                 repo=Path(host["repo"]), python=host["app_python"], home_base=Path(host.get("home_base", "/home")), config=config,
                 apply=request["action"] == "apply", memory_max=fields["memory_max"], syncthing_device=fields["device_id"],
-                skip_cloudflare=not domain, service_user=host["service_user"],
+                onboarding_hostnames=known_hostnames(host.get("data")), service_user=host["service_user"],
                 syncthing_user=config.get("SYNCTHING_USER") or host["service_user"], run=run, http=http,
                 syncthing_url=config.get("SYNCTHING_URL", "http://127.0.0.1:8384"),
                 systemd_dir=Path(host.get("systemd_dir", "/etc/systemd/system")), **(extra or {}))
@@ -736,7 +904,7 @@ def control_service(host, action, name, run=run_command):
 
 def main(argv=None, environ=None):
     parser = argparse.ArgumentParser(prog="ai_manager.provision")
-    parser.add_argument("--data", help="spool commands (tick, service): the manager's data directory, as in the sudoers rule")
+    parser.add_argument("--data", help="the manager's data directory: required by tick/service (as in the sudoers rule); add-user reads onboarding hostnames from its database")
     parser.add_argument("--host-config", type=Path, default=HOST_CONFIG, help=argparse.SUPPRESS)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("tick", help="root: handle spooled web-app requests (started through sudo by a user path unit)")
@@ -747,13 +915,13 @@ def main(argv=None, environ=None):
     add.add_argument("--name", required=True)
     add.add_argument("--email", required=True)
     add.add_argument("--windows-folder", required=True)
-    add.add_argument("--domain", help="zone for <name>.<domain>; or LINKO_DOMAIN")
+    add.add_argument("--domain", help="optional Cloudflare appendix only: zone for <name>.<domain> (needs a dedicated tunnel); "
+                                     "omit it for the default tailnet-only access")
     add.add_argument("--syncthing-device-id")
     add.add_argument("--memory-max", default="1G")
     add.add_argument("--home-base", type=Path, default=Path("/home"))
     add.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="ignored KEY=VALUE credentials file outside git")
     add.add_argument("--service-user", help="the Linux user the manager runs as: it and the Syncthing daemon get scoped ACL access")
-    add.add_argument("--skip-cloudflare", action="store_true")
     add.add_argument("--skip-syncthing", action="store_true")
     add.add_argument("--apply", action="store_true", help="make the changes (default is a dry run)")
     add.add_argument("--dry-run", action="store_true", help="explicit dry run (the default)")
@@ -780,20 +948,18 @@ def main(argv=None, environ=None):
         create_owner(args.email, args.password_file)
         return 0
     config = load_config(args.config, os.environ if environ is None else environ)
-    domain = args.domain or config.get("LINKO_DOMAIN", "")
+    domain = args.domain or ""
     try:
         fields = validate_request({"name": args.name, "email": args.email, "windows_folder": args.windows_folder,
                                    "domain": domain, "memory_max": args.memory_max, "device_id": args.syncthing_device_id})
     except ProvisionError as error:
         parser.error(str(error))
-    if not domain and not args.skip_cloudflare:
-        parser.error("--domain (or LINKO_DOMAIN) is required unless --skip-cloudflare")
     if args.apply and args.dry_run:
         parser.error("--apply and --dry-run exclude each other")
-    plan = Plan(name=args.name, email=args.email, windows_folder=args.windows_folder, domain=domain or "local",
+    plan = Plan(name=args.name, email=args.email, windows_folder=args.windows_folder, domain=domain,
                 repo=Path(__file__).resolve().parents[1], python=sys.executable, home_base=args.home_base, config=config,
                 apply=args.apply, memory_max=fields["memory_max"], syncthing_device=fields["device_id"],
-                skip_cloudflare=args.skip_cloudflare, skip_syncthing=args.skip_syncthing,
+                onboarding_hostnames=known_hostnames(args.data), skip_syncthing=args.skip_syncthing,
                 service_user=args.service_user or "", syncthing_user=config.get("SYNCTHING_USER") or args.service_user or "")
     receipt = provision(plan)
     print_receipt(receipt, plan)

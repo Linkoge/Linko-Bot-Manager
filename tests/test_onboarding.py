@@ -30,7 +30,7 @@ TAILNET_HEADERS = {"x-forwarded-for": "100.64.7.9"}
 SECRETS = {"TAILSCALE_API_KEY": "tskey-api-" + "SECRETAPIKEY" * 2, "CLOUDFLARE_API_TOKEN": "cf-secret-token-marker",
            "SYNCTHING_API_KEY": "st-secret-key-marker"}
 ENV = {**SECRETS, "TAILSCALE_TAILNET": "example.ts.net", "LINKO_MANAGER_URL": "https://manager.example.ts.net",
-       "LINKO_SYNCTHING_DEVICE_ID": DEVICE, "LINKO_DOMAIN": "example.com", "CLOUDFLARE_ACCOUNT_ID": "acc",
+       "LINKO_SYNCTHING_DEVICE_ID": DEVICE, "CLOUDFLARE_ACCOUNT_ID": "acc",
        "CLOUDFLARE_ZONE_ID": "zone", "CLOUDFLARE_TUNNEL_ID": "t" * 8}
 FORM = {"name": "anna", "email": "anna@example.com", "windows_folder": "C:\\Users\\Anna\\Work"}
 
@@ -38,7 +38,7 @@ FORM = {"name": "anna", "email": "anna@example.com", "windows_folder": "C:\\User
 class Host:
     """The manager, its onboarding config, the fake root helper (tick over a fake host) and the owner's browser."""
 
-    def __init__(self, tmp_path, monkeypatch, env=None):
+    def __init__(self, tmp_path, monkeypatch, env=None, trusted=("testclient",), port=80):
         self.tmp, self.env = tmp_path, dict(ENV if env is None else env)
         for name in [n for n in os.environ if n.startswith(("AI_MANAGER_", "TAILSCALE_", "LINKO_", "CLOUDFLARE_", "SYNCTHING_"))]:
             monkeypatch.delenv(name)
@@ -51,7 +51,8 @@ class Host:
         root = tmp_path / "projects"
         root.mkdir()
         self.settings = Settings(data_dir=tmp_path / "data", project_roots=(root,), secure_cookie=False,
-                                 trusted_proxies=("testclient",), onboarding_config=self.config_file)
+                                 trusted_proxies=trusted, onboarding_config=self.config_file,
+                                 port=port)  # the TestClient's own listener port (the enroll route checks it)
         self.settings.prepare()
         (self.settings.data_dir / "deploy").mkdir()
         (self.settings.data_dir / "deploy/installed.json").write_text(json.dumps({"repo": str(ROOT), "data": str(self.settings.data_dir), "instances": []}))
@@ -440,7 +441,7 @@ def test_auto_apply_starts_provisioning_when_the_pc_reports_in(host):
 
 def test_failure_is_recorded_and_retry_reruns_the_idempotent_command(host):
     host.world.ingress.insert(0, {"hostname": "anna.example.com", "service": "http://127.0.0.1:8001"})
-    record = host.create()
+    record = host.create(domain="example.com")  # the optional Cloudflare appendix
     host.tick()
     assert host.report(host.token_of(host.command(record["id"])["command"])).status_code == 200
     host.client.post(f"/api/onboarding/{record['id']}/apply")

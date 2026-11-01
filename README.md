@@ -633,7 +633,7 @@ only asks Tailscale for a hostname when `--hostname` is not given.
 Project menu → **Add user** (owner only, main instance only) onboards a restricted user: fill name, email and Windows folder,
 review the dry-run plan, paste the one generated PowerShell line on the new PC (as Administrator), and click Apply. The PC reports
 its device ID once over the tailnet with a single-use token; provisioning then creates the Linux user, instance, scoped ACLs,
-Cloudflare route/DNS/Access, Syncthing share and deploy registration, and shows the initial login once. The web app never runs
+a tailnet-only Tailscale Serve URL (no Cloudflare), Syncthing share and deploy registration, and shows the initial login once. The web app never runs
 as root: it spools requests to a root-owned launcher (`scripts/install_onboarding.py`). Setup, credentials, CLI fallback,
 troubleshooting and removal: [docs/ONBOARDING.md](docs/ONBOARDING.md).
 

@@ -36,7 +36,8 @@ function renderOnboarding(){
   const head=element('div',undefined,'onboarding-head');
   const back=element('button','← All users');back.type='button';back.onclick=()=>{onboardingId=null;onboardingCommand=null;loadOnboarding();};
   head.append(back,element('strong',`${entry.name} <${entry.email}>`),element('span',onboardingLabels[entry.state],'onboarding-state '+entry.state));body.append(head);
-  body.append(element('p',`Windows folder ${entry.windows_folder}`+(entry.hostname?` · https://${entry.hostname}`:'')));
+  body.append(element('p',`Windows folder ${entry.windows_folder}`+(entry.hostname?` · https://${entry.hostname}`:entry.url?` · ${entry.url}`:'')));
+  body.append(element('p',entry.hostname?'Access: Cloudflare (dedicated tunnel) as requested.':'Access: tailnet only (Tailscale Serve), no Cloudflare.','onboarding-hint'));
   if(entry.error){const error=element('p',entry.error,'onboarding-problem');error.setAttribute('role','alert');body.append(error);}
   body.append(element('h3',entry.state==='done'||entry.state==='provisioning'?'Receipt':entry.state==='failed'?'Last result':'Plan (dry run, nothing has been changed)'));
   onboardingSteps(entry,body);
@@ -58,7 +59,7 @@ function renderOnboardingHome(body){
   if(!onboardingConfig.installed)body.append(element('p','The host helper is not installed yet: see docs/ONBOARDING.md (one-time install).','onboarding-problem'));
   const form=element('form',undefined,'onboarding-form');
   form.append(element('h3','New user'),onboardingField('Name','name','anna'),onboardingField('Email','email','anna@example.com'),onboardingField('Windows folder','windows_folder','C:\\Users\\Anna\\Documents\\Work'));
-  const advanced=element('details');advanced.append(element('summary','Advanced'),onboardingField('Domain','domain','example.com',onboardingConfig.domain||''),onboardingField('Memory limit','memory_max','1G'));
+  const advanced=element('details');advanced.append(element('summary','Advanced'),onboardingField('Cloudflare domain (optional, normally empty: access is over Tailscale only)','domain',''),onboardingField('Memory limit','memory_max','1G'));
   form.append(advanced);
   const submit=element('button','Preview plan','primary');submit.type='submit';form.append(submit);
   form.onsubmit=action(async event=>{event.preventDefault();const values=Object.fromEntries(new FormData(form));

@@ -8,6 +8,7 @@ which writes `<data>/onboarding/results/<id>.json`; `refresh()` folds results in
 import importlib
 import json
 import os
+import re
 import secrets
 import sys
 import tempfile
@@ -22,6 +23,14 @@ STATES = ("pending", "enrolling", "provisioning", "done", "failed")
 PLAN_WAIT, APPLY_WAIT = 300, 3 * 3600
 INSTALL_HINT = ("The host helper is not installed. Once, as root: sudo python3 scripts/install_onboarding.py install; "
                 "then as the manager's user: python3 scripts/install_onboarding.py activate (docs/ONBOARDING.md).")
+
+
+def instance_url(steps):
+    """The tailnet URL the `tailnet serve` step reports (empty before the plan has answered, or with a Cloudflare domain)."""
+    for title, _status, detail in steps:
+        if title == "tailnet serve" and (found := re.search(r"https://[A-Za-z0-9.-]+:\d+", detail or "")):
+            return found.group(0)
+    return ""
 
 
 class Unknown(Exception):
@@ -71,7 +80,8 @@ class Onboarding:
                 "token_expires_at": row["token_expires_at"] if row["token_hash"] else None,
                 "steps": [{"title": t, "status": s, "detail": d} for t, s, d in steps], "error": row["error"],
                 "has_login": bool(row["login_secret"]), "created_at": row["created_at"], "updated_at": row["updated_at"],
-                "hostname": f"{row['name']}.{row['domain']}" if row["domain"] else ""}
+                "hostname": f"{row['name']}.{row['domain']}" if row["domain"] else "",
+                "url": instance_url(steps)}
 
     def row(self, identifier):
         row = self.db.one("SELECT * FROM onboarding WHERE id=?", (identifier,))
@@ -95,7 +105,7 @@ class Onboarding:
         if not self.installed():
             raise ValueError(INSTALL_HINT)
         try:
-            clean = validate_request({**fields, "domain": fields.get("domain") or self.config().get("LINKO_DOMAIN", "")})
+            clean = validate_request(fields)  # no domain means tailnet-only; a domain is never filled in from the config
         except ProvisionError as error:
             raise ValueError(str(error)) from error
         if self.db.one("SELECT 1 FROM onboarding WHERE name=?", (clean["name"],)):
@@ -227,7 +237,7 @@ class Onboarding:
         token, hashed, expires = enrollment.new_token(self.now())
         command = enrollment.build_command(
             auth_key=auth_key, public_key=enrollment.management_public_key(config, Path.home()),
-            windows_folder=row["windows_folder"], url=enrollment.manager_url(config, run),
+            windows_folder=row["windows_folder"], url=enrollment.manager_url(config, run, self.settings.port),
             manager_device=enrollment.syncthing_device_id(config, self.http), token=token, folder_id=f"linko-{row['name']}")
         # A new command replaces any earlier token, so only the line on screen can enroll.
         self.update(identifier, state="enrolling", token_hash=hashed, token_expires_at=expires)
