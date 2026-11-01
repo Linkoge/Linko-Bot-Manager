@@ -88,12 +88,14 @@ def management_public_key(config, home):
     raise ProvisionError("no management SSH public key found; create one with `ssh-keygen -t ed25519` as the manager's user")
 
 
-def manager_url(config, run=None, local_port=8787):
+def manager_url(config, run=None, local_port=None):
     """The manager's own tailnet URL (Tailscale Serve). An explicit LINKO_MANAGER_URL wins, port included.
     Otherwise the hostname is Self.DNSName of `tailscale status --json` and the HTTPS port is the one `tailscale serve
     status --json` publishes for the manager's local port; no 443 is ever assumed."""
     url = (config.get("LINKO_MANAGER_URL") or "").strip().rstrip("/")
     if not url:
+        if not local_port:
+            raise ProvisionError("the manager's local port is unknown: " + "set LINKO_MANAGER_URL (https://<manager>.<tailnet>.ts.net:port)")
         run = run or subprocess.run
         problem = "set LINKO_MANAGER_URL (https://<manager>.<tailnet>.ts.net[:port]) in the onboarding config"
         try:

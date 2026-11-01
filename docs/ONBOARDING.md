@@ -39,9 +39,9 @@ owner UI "Add user"  ──plan/apply──▶  spool  ──▶  user path unit
 - The manager already runs, deploys are installed (`python3 scripts/install_deploy.py`), and the root-owned launcher
   mechanism is available (`sudo`, `visudo`). Install ACL tools: `sudo apt install acl`.
 - The manager is reachable **on the tailnet** (this is how the new PC reports in; the public Cloudflare hostname is
-  deliberately refused for that route). With Tailscale Serve on port 8787 (not 443; the Cloudflare tunnel for production
+  deliberately refused for that route). With Tailscale Serve on the manager's own port (this host's example: 31847; not 443; the Cloudflare tunnel for production
   Messenger traffic is unrelated and never touched):
-  `tailscale serve --bg --https=8787 http://127.0.0.1:8787`, and make sure the tailnet name is in
+  `tailscale serve --bg --https=<manager port> http://127.0.0.1:<manager port>` (e.g. `--https=31847 http://127.0.0.1:31847`), and make sure the tailnet name is in
   `AI_MANAGER_ALLOWED_HOSTS` (the manager's own env file). Never enable Funnel for it.
 - **Trusted proxy** ([section 3.1](#31-the-trusted-proxy-setting)): the manager must trust loopback as its proxy. That is
   already the default (`AI_MANAGER_TRUSTED_PROXIES=127.0.0.1,::1`); do not widen it.
@@ -62,7 +62,7 @@ win over the file). The helper root process reads the same file for the Syncthin
 | `SYNCTHING_USER` | Optional: the Linux user the Syncthing daemon runs as (default: the manager user) |
 | `TAILSCALE_API_KEY`, `TAILSCALE_TAILNET` | Mint single-use PC auth keys on demand (below). Without them the screen shows a field to paste one key |
 | `LINKO_MANAGER_TAILNET_IP` | Optional: the manager's own Tailscale IPv4, used only in the generated policy snippet (default: `tailscale ip -4`; if unknown the snippet shows `<MANAGER_TAILSCALE_IP>` to fill in) |
-| `LINKO_MANAGER_URL` | The manager's tailnet URL **with its port**, e.g. `https://codex-server.tail5ebb9d.ts.net:8787`. Its host is also the name every instance is reached under. Without it the host comes from `tailscale status --json` and the port from `tailscale serve status --json` (the port that serves `127.0.0.1:<manager port>`); if that cannot be determined the command fails and asks you to set this. 443 is never assumed |
+| `LINKO_MANAGER_URL` | The manager's tailnet URL **with its port**, e.g. `https://codex-server.tail5ebb9d.ts.net:31847` (this host's example). Its port is **the manager port** used everywhere below (policy grant, port exclusion); without a port in the URL the app's `AI_MANAGER_PORT` setting is used. Its host is also the name every instance is reached under. Without it the host comes from `tailscale status --json` and the port from `tailscale serve status --json` (the port that serves `127.0.0.1:<manager port>`); if that cannot be determined the command fails and asks you to set this. 443 is never assumed |
 | `LINKO_SYNCTHING_DEVICE_ID` | Optional: the management Syncthing's device ID (default: read through the API) |
 | `LINKO_MANAGEMENT_PUBKEY_FILE` | Optional: another public key file |
 
@@ -110,7 +110,7 @@ The first request is the proof: the Add User screen's plan preview only appears 
 
 ### Access URL per user
 
-Port allocation: a random port in 20000-29999 that is not the manager's 8787, not listening on 127.0.0.1 or 0.0.0.0, not in any
+Port allocation: a random port in 20000-29999 that is not the manager's configured port (the port of `LINKO_MANAGER_URL`, else `AI_MANAGER_PORT`), not listening on 127.0.0.1 or 0.0.0.0, not in any
 `linko-bot-manager*.env`, and not used by `tailscale serve status --json`. After 200 failed picks the **local port** step refuses
 with "no free port found in 20000-29999". Troubleshooting: if the receipt shows that refusal, free ports on the host (`ss -ltn`)
 or clear stale `tailscale serve` entries, then Retry. If a record's policy snippet changes after Apply, the saved port had become busy.
@@ -177,7 +177,7 @@ the live configuration.
 
 ### 3.2 Isolation
 
-A user's PC must reach **only its own instance port**, plus the manager's `:8787` for `/api/enroll/report`: not other users'
+A user's PC must reach **only its own instance port**, plus the manager's `:<manager port>` for `/api/enroll/report`: not other users'
 instances and not unrelated tailnet services. Two independent layers enforce it. The first works today with no Tailscale
 credentials; the second needs the policy change below, applied once by the owner.
 
@@ -202,13 +202,13 @@ minted with it. The Add User receipt (and the screen while enrolling) shows the 
   "hosts": {"linko-manager": "100.100.0.1"},
   "tagOwners": {"tag:linko-anna": ["autogroup:admin"]},
   "grants": [
-    {"src": ["tag:linko-anna"], "dst": ["linko-manager"], "ip": ["tcp:23417", "tcp:8787"]},
+    {"src": ["tag:linko-anna"], "dst": ["linko-manager"], "ip": ["tcp:23417", "tcp:31847"]},
     {"src": ["linko-manager"], "dst": ["tag:linko-anna"], "ip": ["tcp:22", "tcp:22000"]}
   ]
 }
 ```
 
-That is all it grants: the tag reaches the manager host on its own port and 8787; the manager reaches the tag on 22 (SSH)
+That is all it grants: the tag reaches the manager host on its own port and the manager port (31847 in this example); the manager reaches the tag on 22 (SSH)
 and 22000 (Syncthing, which the manager initiates). Merge each user's `hosts`, `tagOwners` and `grants` entries into the tailnet
 policy file (*Access controls*; the same `linko-manager` alias is defined once). `ai_manager/tailnet_policy.py` generates it; the
 app never calls the Tailscale API to change the policy and never edits the tailnet's rules. The snippet appears once the plan has
@@ -238,7 +238,7 @@ Either way the credential is only the mint of single-use keys; it is never in th
 **Verify.** From the user's PC the instance opens (`curl -sI https://<manager tailnet name>:<port>/` returns `200` or a login
 redirect). From **another tailnet device** (not that PC): `curl -m 10 -sI https://<manager tailnet name>:<port>/` returns
 `403` (layer 1) or times out / is refused (layer 2 in force, usually the stronger result), and the same for another user's port and
-for `:8787/api/enroll/report` (`403` or timeout). On the manager, `curl -sI http://127.0.0.1:<port>/api/auth-status` stays `200`
+for `:<manager port>/api/enroll/report` (`403` or timeout). On the manager, `curl -sI http://127.0.0.1:<port>/api/auth-status` stays `200`
 (health checks). In the admin console, *Machines* shows the PC with only its `tag:linko-<name>` tag.
 
 **Rollback.** Layer 1: remove the `AI_MANAGER_ALLOWED_CLIENTS=` line from the instance's env file and
@@ -307,7 +307,7 @@ manager user (after copying the env file as in INSTALL section 6) and set `servi
 ## 6. Removal by hand
 
 There is deliberately no automatic removal. In order: stop publishing the instance, `tailscale serve --https=<port> off`
-(only that port; the manager's own 8787 stays; if the record used the Cloudflare appendix also delete its Access
+(only that port; the manager's own port stays; if the record used the Cloudflare appendix also delete its Access
 application, DNS CNAME and tunnel ingress rule); remove the Syncthing folder `linko-<name>` and the device (Syncthing GUI); remove the `<name>` entry from
 `instances` in `<data>/deploy/installed.json`; then `systemctl disable --now linko-bot-manager-<name>`, delete
 `/etc/systemd/system/linko-bot-manager-<name>.service`, `systemctl daemon-reload`, and finally `userdel -r <name>` after

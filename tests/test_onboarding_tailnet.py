@@ -153,9 +153,9 @@ def test_env_file_hosts_for_tailnet_only_and_for_a_domain(world):
 
 
 def test_tailnet_host_comes_from_the_manager_url_without_its_port_else_from_tailscale(world):
-    assert pv.tailnet_host({"LINKO_MANAGER_URL": "https://codex-server.tail5ebb9d.ts.net:8787"}, world.run) == "codex-server.tail5ebb9d.ts.net"
+    assert pv.tailnet_host({"LINKO_MANAGER_URL": "https://codex-server.tail5ebb9d.ts.net:31847"}, world.run) == "codex-server.tail5ebb9d.ts.net"
     assert pv.tailnet_host({}, world.run) == SELF
-    plan = world.plan(False, domain="", config={**world.plan(False).config, "LINKO_MANAGER_URL": "https://m.tail1.ts.net:8787/"})
+    plan = world.plan(False, domain="", config={**world.plan(False).config, "LINKO_MANAGER_URL": "https://m.tail1.ts.net:31847/"})
     assert plan.tailnet_host() == "m.tail1.ts.net"
     with pytest.raises(pv.ProvisionError, match="LINKO_MANAGER_URL"):
         pv.tailnet_host({}, lambda argv: (1, ""))
@@ -178,27 +178,27 @@ def web(key, target):
 
 def test_manager_url_honours_an_explicit_port():
     run = Tailscale({})
-    assert enrollment.manager_url({"LINKO_MANAGER_URL": "https://codex-server.tail5ebb9d.ts.net:8787/"}, run) \
-        == "https://codex-server.tail5ebb9d.ts.net:8787"
+    assert enrollment.manager_url({"LINKO_MANAGER_URL": "https://codex-server.tail5ebb9d.ts.net:31847/"}, run) \
+        == "https://codex-server.tail5ebb9d.ts.net:31847"
     assert enrollment.manager_url({"LINKO_MANAGER_URL": "https://m.ts.net"}, run) == "https://m.ts.net"
     assert run.calls == []  # an explicit URL never asks Tailscale
     with pytest.raises(pv.ProvisionError):
-        enrollment.manager_url({"LINKO_MANAGER_URL": "https://m.ts.net:8787/path"}, run)
+        enrollment.manager_url({"LINKO_MANAGER_URL": "https://m.ts.net:31847/path"}, run)
 
 
 def test_manager_url_fallback_detects_the_served_port_and_never_assumes_443():
     name = "codex-server.tail5ebb9d.ts.net"
-    assert enrollment.manager_url({}, Tailscale(web(f"{name}:8787", "http://127.0.0.1:8787"))) == f"https://{name}:8787"
-    assert enrollment.manager_url({}, Tailscale(web(f"{name}:443", "http://127.0.0.1:8787"))) == f"https://{name}"
+    assert enrollment.manager_url({}, Tailscale(web(f"{name}:31847", "http://127.0.0.1:31847")), 31847) == f"https://{name}:31847"
+    assert enrollment.manager_url({}, Tailscale(web(f"{name}:443", "http://127.0.0.1:31847")), 31847) == f"https://{name}"
     assert enrollment.manager_url({}, Tailscale(web(f"{name}:8443", "http://localhost:9000")), 9000) == f"https://{name}:8443"
 
 
 @pytest.mark.parametrize("served", [
     {},  # nothing served
-    web("codex-server.tail5ebb9d.ts.net:8787", "http://127.0.0.1:9999"),  # served, but not the manager
-    web("other.ts.net:8787", "http://127.0.0.1:8787"),  # another node's name
-    {"Web": {"codex-server.tail5ebb9d.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8787"}}},
-             "codex-server.tail5ebb9d.ts.net:8787": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8787"}}}}},  # ambiguous
+    web("codex-server.tail5ebb9d.ts.net:31847", "http://127.0.0.1:9999"),  # served, but not the manager
+    web("other.ts.net:31847", "http://127.0.0.1:31847"),  # another node's name
+    {"Web": {"codex-server.tail5ebb9d.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:31847"}}},
+             "codex-server.tail5ebb9d.ts.net:31847": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:31847"}}}}},  # ambiguous
 ])
 def test_manager_url_fallback_fails_clearly_instead_of_guessing(served):
     with pytest.raises(pv.ProvisionError, match="LINKO_MANAGER_URL"):
@@ -282,7 +282,7 @@ def test_cloudflare_headers_are_not_believed_on_the_report_route(serve_host):
 
 
 def test_the_report_must_arrive_on_the_managers_own_listener(tmp_path, monkeypatch):
-    h = Host(tmp_path, monkeypatch, trusted=LOOPBACK, port=8787)  # the TestClient's server port is 80: another listener
+    h = Host(tmp_path, monkeypatch, trusted=LOOPBACK, port=31847)  # the TestClient's server port is 80: another listener
     with h.client:
         h.sign_in()
         response, record = via(h, "127.0.0.1", {"x-forwarded-for": "100.64.7.9"})
@@ -306,7 +306,7 @@ def writes(world):
 
 
 def test_a_tunnel_with_foreign_hostnames_gets_no_write(world):
-    world.ingress = [{"hostname": "messenger.example.com", "service": "http://127.0.0.1:8787"}, {"service": "http_status:404"}]
+    world.ingress = [{"hostname": "messenger.example.com", "service": "http://127.0.0.1:31847"}, {"service": "http_status:404"}]
     receipt = pv.provision(world.plan(True))
     assert status(receipt)["cloudflare tunnel route"] == "refused"
     assert "messenger.example.com" in dict((t, d) for t, _, d in receipt)["cloudflare tunnel route"]

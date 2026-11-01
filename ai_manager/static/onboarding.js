@@ -73,7 +73,7 @@ function renderOnboardingPolicy(entry,body){
   panel.append(element('summary',`Tailscale policy for ${entry.tag}`));
   if(!entry.tailscale_ip)panel.append(element('p','The PC has not reported its Tailscale IP yet, so this instance is not restricted to one client. Re-run Apply once it has reported in.','onboarding-problem'));
   if(!entry.policy){panel.append(element('p','The snippet appears once the plan has allocated this user\'s port (Re-check plan).','onboarding-hint'));body.append(panel);return;}
-  panel.append(element('p',`Paste into the tailnet policy file (Access controls). The PC key is tagged ${entry.tag}; it may reach the manager only on its own port and 8787. The default allow-all rule must be removed for this to isolate. Nothing here is applied for you.`,'onboarding-hint'));
+  panel.append(element('p',`Paste into the tailnet policy file (Access controls). The PC key is tagged ${entry.tag}; it may reach the manager only on its own port and the manager's port. The default allow-all rule must be removed for this to isolate. Nothing here is applied for you.`,'onboarding-hint'));
   const box=element('textarea');box.readOnly=true;box.rows=14;box.value=entry.policy;box.className='onboarding-policy-text';
   const copy=element('button','Copy snippet');copy.type='button';copy.onclick=action(async()=>{box.select();try{await navigator.clipboard.writeText(box.value);}catch{document.execCommand('copy');}});
   panel.append(box,copy);body.append(panel);

@@ -222,8 +222,8 @@ def test_port_skips_env_assigned_listening_manager_and_serve_ports(world):
     other.mkdir(parents=True)
     (other / 'linko-bot-manager-bob.env').write_text('AI_MANAGER_PORT=20001\n')
     world.serve = {'TCP': {'20003': {'HTTPS': True}}, 'Web': {'x.ts.net:20004': {'Handlers': {}}}}
-    plan = world.plan(False, domain='', port_free=lambda p: p != 20002,
-                      pick_port=picks(8787, 20001, 20002, 20003, 20004, 20005))
+    plan = world.plan(False, domain='', port_free=lambda p: p != 20002, config={**world.plan(False).config, 'LINKO_MANAGER_URL': 'https://m.ts.net:31847'},
+                      pick_port=picks(31847, 20001, 20002, 20003, 20004, 20005))
     receipt = pv.provision(plan)
     assert plan.port == 20005 and status(receipt)['local port'] == 'planned'
 
@@ -278,7 +278,7 @@ def test_cli_defaults_to_dry_run(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(pv.subprocess, 'run', lambda argv, **k: subprocess.CompletedProcess(argv, *((0, '{}', '') if argv[0] == 'tailscale' else (1, '', ''))))  # nothing real runs
     code = pv.main(['add-user', '--name', 'anna', '--email', 'a@b.co', '--windows-folder', 'C:\\W',
                     '--skip-syncthing', '--home-base', str(tmp_path), '--config', str(tmp_path / 'none')],
-                   environ={'LINKO_MANAGER_URL': 'https://m.example.ts.net:8787'})
+                   environ={'LINKO_MANAGER_URL': 'https://m.example.ts.net:31847'})
     assert code == 0 and 'DRY RUN' in capsys.readouterr().out and not list(tmp_path.iterdir())
 
 
@@ -353,3 +353,20 @@ def test_powershell_script_enrollment_static():
         assert re.search(rf'\[string\]\${name}\b', text)
     assert 'api/enroll/report' in text and 'autoAcceptFolders' in text and '/rest/config/folders/' in text
     assert not re.search(r'(CLOUDFLARE|SYNCTHING_API|TAILSCALE_API)', text)
+
+
+def test_port_never_picks_the_configured_manager_port(world):
+    assert pv.manager_port({'LINKO_MANAGER_URL': 'https://m.ts.net:24680'}, 9) == 24680
+    assert pv.manager_port({'LINKO_MANAGER_URL': 'https://m.ts.net'}, 24681) == 24681 and pv.manager_port({}, 0) == 0
+    plan = world.plan(False, domain='', manager_default_port=24681, pick_port=picks(24681, 20007))
+    pv.provision(plan)
+    assert plan.port == 20007
+    plan = world.plan(False, domain='', config={**world.plan(False).config, 'LINKO_MANAGER_URL': 'https://m.ts.net:24680'},
+                      manager_default_port=24681, pick_port=picks(24680, 20008))
+    pv.provision(plan)
+    assert plan.port == 20008
+
+
+def test_no_onboarding_module_hardcodes_the_old_manager_port():
+    for name in ('provision.py', 'onboarding.py', 'enrollment.py', 'tailnet_policy.py', 'static/onboarding.js'):
+        assert '8787' not in (ROOT / 'ai_manager' / name).read_text(), name

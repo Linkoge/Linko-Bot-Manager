@@ -43,7 +43,6 @@ DOMAIN_RE = re.compile(r"^(?=.{4,200}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a
 MEMORY_RE = re.compile(r"^[1-9][0-9]{0,5}[MG]$")
 FOLDER_RE = re.compile(r"^[^\x00-\x1f\x7f'\"`\u2018\u2019\u201c\u201d$]{1,260}$")
 FIRST_PORT, LAST_PORT = 20000, 29999  # instance ports are picked at random from this high range
-MANAGER_PORT = 8787  # the manager's own port: never given to an instance
 PORT_ATTEMPTS = 200
 DEFAULT_CONFIG = Path("~/.config/linko-onboarding.env")
 HOST_CONFIG = Path("/etc/linko/onboarding.json")
@@ -147,6 +146,17 @@ def random_port():
 HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
 
 
+def manager_port(config, fallback=0):
+    """The manager's own port: the port of LINKO_MANAGER_URL, else `fallback` (the app's settings.port). 0 = unknown.
+    The one value used for the isolation grant and for keeping instance ports away from the manager."""
+    url = (config.get("LINKO_MANAGER_URL") or "").strip()
+    try:
+        port = urllib.parse.urlsplit(url).port if url else None
+    except ValueError:
+        port = None
+    return port or int(fallback or 0)
+
+
 def tailnet_host(config, run=run_command):
     """The tailnet DNS name of this machine (no scheme, no port)."""
     url = (config.get("LINKO_MANAGER_URL") or "").strip()
@@ -248,6 +258,7 @@ class Plan:
     onboarding_hostnames: frozenset = frozenset()  # hostnames onboarding created (DB records + allow-list): the only ones a tunnel may hold
     service_user: str = ""  # the Linux user the manager runs as: gets scoped access to the new instance's data
     syncthing_user: str = ""  # the Linux user the Syncthing daemon runs as: gets scoped access to the new folder
+    manager_default_port: int = 0  # settings.port of the manager app (request "manager_port"): used when LINKO_MANAGER_URL has no port
     client_ip: str = ""  # the enrolled PC's Tailscale IP (its report); "" until it has reported in
 
     @property
@@ -371,7 +382,7 @@ class Port(Step):
             if match:
                 p.port = int(match.group(1))
                 return EXISTS, f"port {p.port} from existing env file"
-        taken = {MANAGER_PORT}
+        taken = {manager_port(p.config, p.manager_default_port)} - {0}
         for env in list(p.home_base.glob("*/.config/linko-bot-manager*.env")) + list(Path.home().glob(".config/linko-bot-manager*.env")):
             taken.update(int(m) for m in re.findall(r"^AI_MANAGER_PORT=(\d+)$", env.read_text(errors="ignore"), re.M))
         try:
@@ -937,11 +948,13 @@ def handle_request(path, host, directory, run=run_command, http=http_json, extra
     if client_ip and not in_tailnet(client_ip):  # lands in an env file as root: only a Tailscale address
         raise ProvisionError("malformed request")
     config = load_config(host["config_file"], {})
+    default_port = request.get("manager_port")
     plan = Plan(name=fields["name"], email=fields["email"], windows_folder=fields["windows_folder"], domain=fields["domain"],
                 repo=Path(host["repo"]), python=host["app_python"], home_base=Path(host.get("home_base", "/home")), config=config,
                 apply=request["action"] == "apply", memory_max=fields["memory_max"], syncthing_device=fields["device_id"],
                 onboarding_hostnames=known_hostnames(host.get("data")), service_user=host["service_user"],
                 syncthing_user=config.get("SYNCTHING_USER") or host["service_user"], run=run, http=http, client_ip=client_ip,
+                manager_default_port=default_port if isinstance(default_port, int) and 0 < default_port < 65536 else 0,
                 syncthing_url=config.get("SYNCTHING_URL", "http://127.0.0.1:8384"),
                 systemd_dir=Path(host.get("systemd_dir", "/etc/systemd/system")), **(extra or {}))
     saved_port = request.get("port")
@@ -1056,7 +1069,8 @@ def main(argv=None, environ=None):
                 apply=args.apply, memory_max=fields["memory_max"], syncthing_device=fields["device_id"],
                 onboarding_hostnames=known_hostnames(args.data), skip_syncthing=args.skip_syncthing,
                 service_user=args.service_user or "", syncthing_user=config.get("SYNCTHING_USER") or args.service_user or "",
-                client_ip=args.client_ip)
+                client_ip=args.client_ip,
+                manager_default_port=int(os.environ.get("AI_MANAGER_PORT") or 0) if (os.environ.get("AI_MANAGER_PORT") or "").isdigit() else 0)
     receipt = provision(plan)
     print_receipt(receipt, plan)
     return 1 if any(s in ("failed", "refused") for _, s, _ in receipt) else 0

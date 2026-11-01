@@ -29,7 +29,7 @@ PC_DEVICE = "-".join(["WINDEVX"] * 8)
 TAILNET_HEADERS = {"x-forwarded-for": "100.64.7.9"}
 SECRETS = {"TAILSCALE_API_KEY": "tskey-api-" + "SECRETAPIKEY" * 2, "CLOUDFLARE_API_TOKEN": "cf-secret-token-marker",
            "SYNCTHING_API_KEY": "st-secret-key-marker"}
-ENV = {**SECRETS, "TAILSCALE_TAILNET": "example.ts.net", "LINKO_MANAGER_URL": "https://manager.example.ts.net", "LINKO_MANAGER_TAILNET_IP": "100.100.0.1",
+ENV = {**SECRETS, "TAILSCALE_TAILNET": "example.ts.net", "LINKO_MANAGER_URL": "https://manager.example.ts.net:31847", "LINKO_MANAGER_TAILNET_IP": "100.100.0.1",
        "LINKO_SYNCTHING_DEVICE_ID": DEVICE, "CLOUDFLARE_ACCOUNT_ID": "acc",
        "CLOUDFLARE_ZONE_ID": "zone", "CLOUDFLARE_TUNNEL_ID": "t" * 8}
 FORM = {"name": "anna", "email": "anna@example.com", "windows_folder": "C:\\Users\\Anna\\Work"}
@@ -263,7 +263,7 @@ def test_one_liner_embeds_the_script_and_only_single_use_credentials(host):
     assert "Invoke-WebRequest" not in command and "iwr" not in command.lower().split()
     arguments = dict(re.findall(r"-(\w+) '([^']*)'", command))
     assert arguments == {"TailscaleAuthKey": "tskey-auth-kSingleUse12345", "ManagementPublicKey": host.pubkey,
-                         "WindowsFolder": FORM["windows_folder"], "ManagerUrl": "https://manager.example.ts.net",
+                         "WindowsFolder": FORM["windows_folder"], "ManagerUrl": "https://manager.example.ts.net:31847",
                          "ManagerDeviceId": DEVICE, "FolderId": "linko-anna", "EnrollmentToken": token}
     for secret in SECRETS.values():
         assert secret not in command and secret not in json.dumps(result)

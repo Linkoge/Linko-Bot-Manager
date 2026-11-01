@@ -17,7 +17,7 @@ from pathlib import Path
 
 from . import enrollment, tailnet_policy
 from .config import CODE_ROOT
-from .provision import DEFAULT_CONFIG, HOST_CONFIG, ProvisionError, http_json, load_config, validate_request
+from .provision import DEFAULT_CONFIG, HOST_CONFIG, ProvisionError, http_json, load_config, manager_port, validate_request
 
 STATES = ("pending", "enrolling", "provisioning", "done", "failed")
 PLAN_WAIT, APPLY_WAIT = 300, 3 * 3600
@@ -100,7 +100,7 @@ class Onboarding:
     def policy(self, name, port):
         """The tailnet policy snippet for this user's tag (to be applied by the owner; the app never edits the policy),
         or None while the instance port is not allocated yet (Re-check plan)."""
-        return tailnet_policy.snippet([(name, port)], self.manager_ip()) if port else None
+        return tailnet_policy.snippet([(name, port)], self.manager_ip(), manager_port(self.config(), self.settings.port)) if port else None
 
     def row(self, identifier):
         row = self.db.one("SELECT * FROM onboarding WHERE id=?", (identifier,))
@@ -165,7 +165,8 @@ class Onboarding:
         private_json(self.root / "requests" / f"{identifier}.json", {
             "id": identifier, "action": action, "name": row["name"], "email": row["email"],
             "windows_folder": row["windows_folder"], "domain": row["domain"], "memory_max": row["memory_max"],
-            "device_id": row["device_id"], "tailscale_ip": row["tailscale_ip"] or "", "port": row["port"] or 0})
+            "device_id": row["device_id"], "tailscale_ip": row["tailscale_ip"] or "", "port": row["port"] or 0,
+            "manager_port": self.settings.port})
         (self.root / "results").mkdir(parents=True, exist_ok=True, mode=0o700)
         (self.root / "results" / f"{identifier}.json").unlink(missing_ok=True)
         self.update(identifier, pending_action=action, requested_at=self.now())
